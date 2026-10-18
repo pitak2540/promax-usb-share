@@ -1,0 +1,13 @@
+build/
+.gradle/
+out/
+classes/
+jar/
+dist/
+local.properties
+*.iml
+.idea/
+
+# never commit the license private key
+*.key
+*.keystore

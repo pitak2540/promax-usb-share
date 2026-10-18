@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tactrix OpenPort 2.0 -->
+    <usb-device vendor-id="1027" product-id="52300" />
+    <usb-device vendor-id="1027" product-id="52301" />
+    <!-- Scanmatik SM2 Pro -->
+    <usb-device vendor-id="8354" product-id="1" />
+    <!-- FTDI (all) -->
+    <usb-device vendor-id="1027" />
+    <!-- WCH CH340 / CH341A -->
+    <usb-device vendor-id="6790" />
+    <!-- Prolific PL2303, Silicon Labs CP210x -->
+    <usb-device vendor-id="1659" />
+    <usb-device vendor-id="4292" />
+</resources>

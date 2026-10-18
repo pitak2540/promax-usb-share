@@ -1,0 +1,148 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - name: Protocol tests
+        run: |
+          mkdir -p out
+          javac -encoding UTF-8 -d out $(find common keygen -name '*.java')
+          java -cp out com.james.usbshare.usbip.ServerTest
+
+  android:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.9' }
+      - name: Build APK
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then echo "::error title=KEYSTORE::ยังไม่ได้ใส่ secret ANDROID_KEYSTORE_B64 / ANDROID_KEYSTORE_PASSWORD"; exit 1; fi
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > android/app/release.keystore
+          export KEYSTORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+          gradle -p android assembleRelease --no-daemon --stacktrace
+          rm -f android/app/release.keystore
+      - name: Rename
+        run: cp android/app/build/outputs/apk/release/app-release.apk PromaxUsbShare.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: PromaxUsbShare-apk, path: PromaxUsbShare.apk }
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Build EXE
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $src = Get-ChildItem -Recurse -Filter *.java common/src, desktop/src | ForEach-Object { $_.FullName }
+          New-Item -ItemType Directory -Force classes, jar, dist | Out-Null
+          javac --release 17 -encoding UTF-8 -d classes $src
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          jar --create --file jar/app.jar --main-class com.james.usbshare.desktop.App -C classes . -C desktop/resources .
+          # obfuscate with ProGuard
+          gh release download -R Guardsquare/proguard --pattern "proguard-*.zip" -D pgdl --clobber
+          $pz = Get-ChildItem pgdl -Filter "proguard-*.zip" | Where-Object { $_.Name -notmatch 'gradle|ant' } | Select-Object -First 1
+          Expand-Archive $pz.FullName pg -Force
+          $pgjar = Get-ChildItem -Recurse pg -Filter proguard.jar | Select-Object -First 1
+          Write-Host "::notice title=PROGUARD::using $($pz.Name) / $($pgjar.FullName)"
+          $pgout = & java -jar $pgjar.FullName "@desktop/proguard.pro" 2>&1
+          $pgcode = $LASTEXITCODE
+          $pgout | Select-Object -Last 30 | ForEach-Object { Write-Host $_ }
+          if ($pgcode -ne 0) {
+            $pgout | Where-Object { $_ -match 'Error|error|Exception|Warning' } | Select-Object -First 8 | ForEach-Object { Write-Host "::error title=PROGUARD::$_" }
+            exit 1
+          }
+          Move-Item -Force jar/app-obf.jar jar/app.jar
+          Write-Host "::notice title=PROGUARD::Windows program obfuscated with $($pz.Name)"
+          jpackage --type app-image --name PromaxUsbShare --input jar --main-jar app.jar `
+            --main-class com.james.usbshare.desktop.App --icon desktop/icon.ico `
+            --app-version 1.0.0 --vendor "PROMAX" --description "PROMAX USB Share" `
+            --add-modules java.base,java.desktop,java.logging,java.prefs,jdk.crypto.ec,jdk.crypto.cryptoki --java-options "-Dfile.encoding=UTF-8" --dest dist
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $p = Start-Process -FilePath dist\PromaxUsbShare\PromaxUsbShare.exe -ArgumentList '--selftest-relay' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Host "::error title=SELFTEST::bundled runtime cannot reach the relay over TLS"; exit 1 }
+          Write-Host "::notice title=SELFTEST::bundled runtime reached the relay over TLS"
+          Compress-Archive -Path dist/PromaxUsbShare -DestinationPath PromaxUsbShare-Windows.zip
+          # owner-only key generator (no private key inside: it is loaded from a file at run time)
+          $ksrc = Get-ChildItem -Recurse -Filter *.java common/src, keygen/src | ForEach-Object { $_.FullName }
+          New-Item -ItemType Directory -Force kclasses, kjar, kdist | Out-Null
+          javac --release 17 -encoding UTF-8 -d kclasses $ksrc
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          jar --create --file kjar/keygen.jar --main-class com.james.usbshare.keygen.KeygenApp -C kclasses .
+          jpackage --type app-image --name PromaxLicenseGen --input kjar --main-jar keygen.jar `
+            --main-class com.james.usbshare.keygen.KeygenApp --icon desktop/icon.ico `
+            --app-version 1.0.0 --vendor "PROMAX" --description "PROMAX License Generator" `
+            --add-modules java.base,java.desktop,java.logging,java.prefs,jdk.crypto.ec --java-options "-Dfile.encoding=UTF-8" --dest kdist
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Compress-Archive -Path kdist/PromaxLicenseGen -DestinationPath PromaxLicenseGen-Windows.zip
+      - name: Fetch drivers for installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          USBIP_TAG: v.0.9.8.1
+        run: ./installer/fetch-drivers.ps1
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          if (-not (Test-Path $iscc)) { Write-Host "::error title=ISCC::Inno Setup not found"; exit 1 }
+          $out = & $iscc /DAppVersion=1.0.${{ github.run_number }} installer\setup.iss 2>&1
+          $code = $LASTEXITCODE
+          $out | Select-Object -Last 25 | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) {
+            $out | Where-Object { $_ -match 'Error|error|Line' } | Select-Object -Last 6 | ForEach-Object { Write-Host "::error title=ISCC::$_" }
+            exit 1
+          }
+          Copy-Item dist\PromaxUsbShare-Setup.exe PromaxUsbShare-Setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PromaxUsbShare-windows
+          path: |
+            PromaxUsbShare-Windows.zip
+            PromaxUsbShare-Setup.exe
+            PromaxLicenseGen-Windows.zip
+
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dl, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: PROMAX USB Share v1.0.${{ github.run_number }}
+          body: |
+            - PromaxUsbShare.apk — ติดตั้งบนมือถือ Android 9 ขึ้นไป (เสียบอุปกรณ์ผ่าน OTG)
+            - PromaxUsbShare-Setup.exe — ตัวติดตั้งบน Windows (ลงโปรแกรม + usbip-win2 + usbipd-win + ไดรเวอร์สายให้ครบ)
+            - PromaxUsbShare-Windows.zip — แบบไม่ต้องติดตั้ง (ต้องลงไดรเวอร์เอง)
+          files: |
+            dl/PromaxUsbShare.apk
+            dl/PromaxUsbShare-Windows.zip
+            dl/PromaxUsbShare-Setup.exe
+            dl/PromaxLicenseGen-Windows.zip

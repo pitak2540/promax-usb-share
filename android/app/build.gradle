@@ -1,0 +1,53 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.james.usbshare.android'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.promax.usbshare'
+        minSdk 28
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            // Fixed key so new versions install over old ones. The keystore is NOT in the repo:
+            // CI writes it from the ANDROID_KEYSTORE_B64 secret; locally put it at android/app/release.keystore
+            // and set KEYSTORE_PASSWORD (ANDROID_KEYSTORE_PASSWORD secret in CI).
+            storeFile file(System.getenv('KEYSTORE_FILE') ?: 'release.keystore')
+            storePassword System.getenv('KEYSTORE_PASSWORD') ?: ''
+            keyAlias 'jamesusbshare'
+            keyPassword System.getenv('KEYSTORE_PASSWORD') ?: ''
+        }
+    }
+
+    buildTypes {
+        release {
+            // R8: shrink + obfuscate so the license code is hard to find and patch
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += ['../../common/src']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
