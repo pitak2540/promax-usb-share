@@ -20,7 +20,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.prefs.Preferences;
 
-/** Owner-only tool: issues PROMAX USB Share license keys with the private key file. */
+/** Owner-only tool: issues license keys with the private key file. */
 public class KeygenApp {
     static final Color BG = new Color(0x0B0D10), CARD = new Color(0x161A21), BLUE = new Color(0x1FA2FF),
             RED = new Color(0xE53935), SILVER = new Color(0xC3C9D0), GREEN = new Color(0x2ECC71), LINE = new Color(0x2A313B);
@@ -74,7 +74,7 @@ public class KeygenApp {
     }
 
     Path historyFile() {
-        Path dir = Path.of(System.getProperty("user.home"), "Documents", "PROMAX License");
+        Path dir = Path.of(System.getProperty("user.home"), "Documents", com.james.usbshare.Brand.LICENSE_FOLDER);
         try { Files.createDirectories(dir); } catch (Exception ignored) {}
         return dir.resolve("licenses.csv");
     }
@@ -101,7 +101,7 @@ public class KeygenApp {
         try { UIManager.setLookAndFeel(UIManager.getCrossPlatformLookAndFeelClassName()); } catch (Exception ignored) {}
         Font f = font(Font.PLAIN, 14);
         applyThaiFont(f);
-        frame = new JFrame("PROMAX License Generator — ออกคีย์ PROMAX USB Share");
+        frame = new JFrame("ออกคีย์ " + com.james.usbshare.Brand.NAME);
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         JPanel root = new JPanel(new BorderLayout(10, 10));
         root.setBackground(BG);
@@ -116,7 +116,7 @@ public class KeygenApp {
         g.fill = GridBagConstraints.HORIZONTAL;
         int y = 0;
 
-        JLabel title = new JLabel("ออกคีย์ลงทะเบียน PROMAX USB Share");
+        JLabel title = new JLabel("ออกคีย์ลงทะเบียน " + com.james.usbshare.Brand.NAME);
         title.setFont(font(Font.BOLD, 20));
         title.setForeground(Color.WHITE);
         g.gridx = 0; g.gridy = y++; g.gridwidth = 3; form.add(title, g);
@@ -271,7 +271,7 @@ public class KeygenApp {
 
     String customerMessage() {
         if (lastKey.isEmpty()) return "";
-        return "คีย์ลงทะเบียน PROMAX USB Share\n" + lastKey
+        return "คีย์ลงทะเบียน " + com.james.usbshare.Brand.NAME + "\n" + lastKey
                 + "\n\nวิธีใช้: เปิดโปรแกรมบนคอม และ/หรือแอพบนมือถือ → ลงทะเบียน → ใส่คีย์เดียวกันนี้ → ยืนยัน"
                 + "\n(ใช้ได้กับเครื่องรหัส " + lastIds + " เท่านั้น)";
     }

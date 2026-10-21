@@ -24,8 +24,16 @@ jobs:
   android:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        brand: [promax, baanna]
     steps:
       - uses: actions/checkout@v4
+      - name: Apply brand
+        run: |
+          pip install --quiet pillow
+          echo "FILE=$(python3 tools/brand.py ${{ matrix.brand }})" >> "$GITHUB_ENV"
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v4
@@ -42,15 +50,26 @@ jobs:
           gradle -p android assembleRelease --no-daemon --stacktrace
           rm -f android/app/release.keystore
       - name: Rename
-        run: cp android/app/build/outputs/apk/release/app-release.apk PromaxUsbShare.apk
+        run: cp android/app/build/outputs/apk/release/app-release.apk "$FILE.apk"
       - uses: actions/upload-artifact@v4
-        with: { name: PromaxUsbShare-apk, path: PromaxUsbShare.apk }
+        with: { name: "${{ env.FILE }}-apk", path: "${{ env.FILE }}.apk" }
 
   windows:
     needs: test
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        brand: [promax, baanna]
     steps:
       - uses: actions/checkout@v4
+      - name: Apply brand
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pillow
+          $f = (python tools/brand.py ${{ matrix.brand }}).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $f) { exit 1 }
+          "FILE=$f" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '21' }
       - name: Build EXE
@@ -78,27 +97,27 @@ jobs:
           }
           Move-Item -Force jar/app-obf.jar jar/app.jar
           Write-Host "::notice title=PROGUARD::Windows program obfuscated with $($pz.Name)"
-          jpackage --type app-image --name PromaxUsbShare --input jar --main-jar app.jar `
+          jpackage --type app-image --name $env:FILE --input jar --main-jar app.jar `
             --main-class com.james.usbshare.desktop.App --icon desktop/icon.ico `
-            --app-version 1.0.0 --vendor "PROMAX" --description "PROMAX USB Share" `
+            --app-version 1.0.0 --vendor $env:FILE --description $env:FILE `
             --add-modules java.base,java.desktop,java.logging,java.prefs,jdk.crypto.ec,jdk.crypto.cryptoki --java-options "-Dfile.encoding=UTF-8" --dest dist
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $p = Start-Process -FilePath dist\PromaxUsbShare\PromaxUsbShare.exe -ArgumentList '--selftest-relay' -Wait -PassThru
+          $p = Start-Process -FilePath "dist\$env:FILE\$env:FILE.exe" -ArgumentList '--selftest-relay' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Write-Host "::error title=SELFTEST::bundled runtime cannot reach the relay over TLS"; exit 1 }
           Write-Host "::notice title=SELFTEST::bundled runtime reached the relay over TLS"
-          Compress-Archive -Path dist/PromaxUsbShare -DestinationPath PromaxUsbShare-Windows.zip
+          Compress-Archive -Path "dist/$env:FILE" -DestinationPath "$env:FILE-Windows.zip"
           # owner-only key generator (no private key inside: it is loaded from a file at run time)
           $ksrc = Get-ChildItem -Recurse -Filter *.java common/src, keygen/src | ForEach-Object { $_.FullName }
           New-Item -ItemType Directory -Force kclasses, kjar, kdist | Out-Null
           javac --release 17 -encoding UTF-8 -d kclasses $ksrc
           if ($LASTEXITCODE -ne 0) { exit 1 }
           jar --create --file kjar/keygen.jar --main-class com.james.usbshare.keygen.KeygenApp -C kclasses .
-          jpackage --type app-image --name PromaxLicenseGen --input kjar --main-jar keygen.jar `
+          jpackage --type app-image --name "$env:FILE-LicenseGen" --input kjar --main-jar keygen.jar `
             --main-class com.james.usbshare.keygen.KeygenApp --icon desktop/icon.ico `
-            --app-version 1.0.0 --vendor "PROMAX" --description "PROMAX License Generator" `
+            --app-version 1.0.0 --vendor $env:FILE --description "$env:FILE-LicenseGen" `
             --add-modules java.base,java.desktop,java.logging,java.prefs,jdk.crypto.ec --java-options "-Dfile.encoding=UTF-8" --dest kdist
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          Compress-Archive -Path kdist/PromaxLicenseGen -DestinationPath PromaxLicenseGen-Windows.zip
+          Compress-Archive -Path "kdist/$env:FILE-LicenseGen" -DestinationPath "$env:FILE-LicenseGen-Windows.zip"
       - name: Fetch drivers for installer
         shell: pwsh
         env:
@@ -118,14 +137,14 @@ jobs:
             $out | Where-Object { $_ -match 'Error|error|Line' } | Select-Object -Last 6 | ForEach-Object { Write-Host "::error title=ISCC::$_" }
             exit 1
           }
-          Copy-Item dist\PromaxUsbShare-Setup.exe PromaxUsbShare-Setup.exe
+          Copy-Item "dist\$env:FILE-Setup.exe" "$env:FILE-Setup.exe"
       - uses: actions/upload-artifact@v4
         with:
-          name: PromaxUsbShare-windows
+          name: "${{ env.FILE }}-windows"
           path: |
-            PromaxUsbShare-Windows.zip
-            PromaxUsbShare-Setup.exe
-            PromaxLicenseGen-Windows.zip
+            ${{ env.FILE }}-Windows.zip
+            ${{ env.FILE }}-Setup.exe
+            ${{ env.FILE }}-LicenseGen-Windows.zip
 
   release:
     needs: [android, windows]
@@ -136,13 +155,10 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: PROMAX USB Share v1.0.${{ github.run_number }}
+          name: v1.0.${{ github.run_number }} — PROMAX + บ้านนา ดีเซล
           body: |
-            - PromaxUsbShare.apk — ติดตั้งบนมือถือ Android 9 ขึ้นไป (เสียบอุปกรณ์ผ่าน OTG)
-            - PromaxUsbShare-Setup.exe — ตัวติดตั้งบน Windows (ลงโปรแกรม + usbip-win2 + usbipd-win + ไดรเวอร์สายให้ครบ)
-            - PromaxUsbShare-Windows.zip — แบบไม่ต้องติดตั้ง (ต้องลงไดรเวอร์เอง)
-          files: |
-            dl/PromaxUsbShare.apk
-            dl/PromaxUsbShare-Windows.zip
-            dl/PromaxUsbShare-Setup.exe
-            dl/PromaxLicenseGen-Windows.zip
+            ทุกแบรนด์ใช้โค้ดเดียวกัน คีย์จากโปรแกรมออกคีย์ใช้ได้ทุกแบรนด์
+            - PromaxUsbShare.* — PROMAX USB Share (Tune by MAXS)
+            - BaanNaDiesel.* — บ้านนา ดีเซล
+            - *.apk มือถือ Android 9+ · *-Setup.exe ตัวติดตั้ง Windows · *-Windows.zip แบบไม่ติดตั้ง · *-LicenseGen-Windows.zip โปรแกรมออกคีย์ (เจ้าของเท่านั้น)
+          files: dl/*

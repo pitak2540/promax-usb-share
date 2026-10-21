@@ -72,7 +72,7 @@ public final class LicenseGuard {
 
     /** Copies the device id (with a short message) and opens the developer's LINE. */
     public void contactDeveloper() {
-        String msg = "ขอซื้อคีย์ PROMAX USB Share (คอม)\nรหัสเครื่อง: " + deviceId();
+        String msg = "ขอซื้อคีย์ " + com.james.usbshare.Brand.NAME + " (คอม)\nรหัสเครื่อง: " + deviceId();
         Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(msg), null);
         app.log("คัดลอกรหัสเครื่องแล้ว (" + deviceId() + ") — วางในแชท LINE ได้เลย");
         app.openUrl(License.CONTACT_URL);
@@ -125,7 +125,7 @@ public final class LicenseGuard {
         String saved = prefs.get("lic.key", "");
         key.setText(saved);
         p.add(new JScrollPane(key), BorderLayout.CENTER);
-        int r = JOptionPane.showConfirmDialog(app.frame, p, "ลงทะเบียน PROMAX USB Share", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        int r = JOptionPane.showConfirmDialog(app.frame, p, "ลงทะเบียน " + com.james.usbshare.Brand.NAME, JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (r != JOptionPane.OK_OPTION) return;
         String k = key.getText().trim();
         if (k.isEmpty() || k.equals(saved)) return;

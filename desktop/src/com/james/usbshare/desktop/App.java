@@ -86,14 +86,14 @@ public class App {
         licLabel.setText(com.james.usbshare.license.License.describe(st));
         licLabel.setForeground(st.kind == com.james.usbshare.license.License.Kind.LICENSED ? GREEN : st.allowed() ? new Color(0xFFB300) : RED);
     }
-    final Preferences prefs = Preferences.userRoot().node("com/promax/usbshare/desktop");
+    final Preferences prefs = Preferences.userRoot().node(com.james.usbshare.Brand.PREFS);
     final Map<String, Relay.Forwarder> forwarders = new LinkedHashMap<>();
     String lastPortRaw = "";
 
     public static void main(String[] args) {
         if (args.length > 0 && args[0].equals("--clear-history")) {
             // run by the uninstaller: forget phones/PCs and pairing codes, keep license + trial date
-            Preferences p = Preferences.userRoot().node("com/promax/usbshare/desktop");
+            Preferences p = Preferences.userRoot().node(com.james.usbshare.Brand.PREFS);
             for (String k : new String[]{"relayCodes", "relayUrl", "hostCode"}) p.remove(k);
             try { p.flush(); } catch (Exception ignored) {}
             System.exit(0);
@@ -241,7 +241,7 @@ public class App {
         UIManager.put("OptionPane.messageFont", FONT);
         UIManager.put("OptionPane.buttonFont", FONT);
 
-        frame = new JFrame("PROMAX USB Share — Windows");
+        frame = new JFrame(com.james.usbshare.Brand.NAME);
         java.awt.image.BufferedImage logoImg = null;
         try (java.io.InputStream li = App.class.getResourceAsStream("/logo.png")) {
             if (li != null) logoImg = javax.imageio.ImageIO.read(li);
@@ -260,10 +260,13 @@ public class App {
         // ---- header
         JPanel header = new JPanel(new BorderLayout());
         header.setOpaque(false);
-        JLabel title = new JLabel("PROMAX USB Share");
+        JLabel title = new JLabel(com.james.usbshare.Brand.NAME);
         title.setFont(FONT_TITLE);
         title.setForeground(Color.WHITE);
-        JLabel sub = new JLabel("แชร์ USB จากมือถือหรือคอมอีกเครื่อง มาใช้เหมือนเสียบตรงที่คอมนี้  •  Tune by MAXS");
+        String generic = "แชร์ USB จากมือถือหรือคอมอีกเครื่อง มาใช้เหมือนเสียบตรงที่คอมนี้";
+        // a long tagline (shop details) replaces the generic line so it is not cut off
+        JLabel sub = new JLabel(com.james.usbshare.Brand.TAGLINE.length() > 30 ? com.james.usbshare.Brand.TAGLINE
+                : generic + "  •  " + com.james.usbshare.Brand.TAGLINE);
         sub.setFont(FONT);
         sub.setForeground(SILVER);
         JPanel titles = new JPanel(new GridLayout(2, 1));
@@ -277,7 +280,9 @@ public class App {
             if (wi != null) wordmark = javax.imageio.ImageIO.read(wi);
         } catch (Exception ignored) {}
         if (wordmark != null) {
-            int ww = 230, wh = wordmark.getHeight() * ww / wordmark.getWidth();
+            // fit any logo shape into the header: at most 230 wide and 84 high
+            double k = Math.min(230.0 / wordmark.getWidth(), 84.0 / wordmark.getHeight());
+            int ww = (int) Math.round(wordmark.getWidth() * k), wh = (int) Math.round(wordmark.getHeight() * k);
             JLabel wl = new JLabel(new ImageIcon(wordmark.getScaledInstance(ww, wh, Image.SCALE_SMOOTH)));
             wl.setBorder(new EmptyBorder(0, 0, 0, 6));
             brand.add(wl, BorderLayout.WEST);
@@ -440,7 +445,7 @@ public class App {
         for (String c : prefs.get("relayCodes", "").split(",")) if (!c.isEmpty()) addRelay(c, false);
         new Timer(30000, e -> refreshRelayStatus()).start();
         work.execute(this::refreshPorts);
-        log("พร้อมใช้งาน — เปิดแอพ PROMAX USB Share บนมือถือ แล้วต่อ Wi-Fi วงเดียวกับคอมนี้");
+        log("พร้อมใช้งาน — เปิดแอพ " + com.james.usbshare.Brand.NAME + " บนมือถือ แล้วต่อ Wi-Fi วงเดียวกับคอมนี้");
     }
 
     void updateUsbipStatus() {
@@ -451,7 +456,7 @@ public class App {
         } else {
             usbipStatus.setText("ยังไม่ได้ติดตั้ง usbip-win2");
             usbipStatus.setForeground(RED);
-            log("ยังไม่พบ usbip-win2 — รันตัวติดตั้ง PromaxUsbShare-Setup.exe อีกครั้ง แล้วรีสตาร์ทเครื่อง");
+            log("ยังไม่พบ usbip-win2 — รันตัวติดตั้ง " + com.james.usbshare.Brand.FILE + "-Setup.exe อีกครั้ง แล้วรีสตาร์ทเครื่อง");
         }
     }
 
@@ -538,7 +543,7 @@ public class App {
             }
             for (Thread t : probes) { try { t.join(8000); } catch (InterruptedException ignored) {} }
             if (userClicked) {
-                if (found[0] == 0) log("Tailscale: ยังไม่เจอมือถือ — เปิด Tailscale และแอพ PROMAX USB Share บนมือถือ (กด 'เริ่มแชร์') แล้วลองใหม่");
+                if (found[0] == 0) log("Tailscale: ยังไม่เจอมือถือ — เปิด Tailscale และแอพ " + com.james.usbshare.Brand.NAME + " บนมือถือ (กด 'เริ่มแชร์') แล้วลองใหม่");
                 else log("Tailscale: พบมือถือ " + found[0] + " เครื่อง");
             }
         });

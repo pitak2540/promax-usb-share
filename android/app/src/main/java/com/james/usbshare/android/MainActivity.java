@@ -112,18 +112,22 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         android.widget.ImageView logo = new android.widget.ImageView(this);
-        logo.setImageResource(R.drawable.promax_logo);
+        logo.setImageResource(R.drawable.brand_logo);
         logo.setAdjustViewBounds(true);
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(dp(300), -2);
+        // wide logos up to 300 dp wide, square logos up to 160 dp tall
+        android.graphics.drawable.Drawable ld = getResources().getDrawable(R.drawable.brand_logo, null);
+        boolean wide = ld.getIntrinsicWidth() > ld.getIntrinsicHeight() * 2;
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(wide ? dp(300) : dp(160), wide ? -2 : dp(160));
         llp.bottomMargin = dp(10);
         llp.gravity = Gravity.CENTER_HORIZONTAL;
         logo.setLayoutParams(llp);
         root.addView(logo);
-        TextView title = text("PROMAX USB Share", 26, Color.WHITE, true);
+        TextView title = text("" + com.james.usbshare.Brand.NAME, 26, Color.WHITE, true);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         title.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
         root.addView(title);
-        TextView sub = text("แชร์ USB จากมือถือไปคอม Windows  •  Tune by MAXS", 13, SILVER, false);
+        TextView sub = text(com.james.usbshare.Brand.TAGLINE.length() > 30 ? com.james.usbshare.Brand.TAGLINE
+                : "แชร์ USB จากมือถือไปคอม Windows  •  " + com.james.usbshare.Brand.TAGLINE, 13, SILVER, false);
         sub.setGravity(Gravity.CENTER_HORIZONTAL);
         sub.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
         root.addView(sub);
@@ -255,7 +259,7 @@ public class MainActivity extends Activity {
         LinearLayout c3 = card();
         c3.addView(text("วิธีใช้บนคอม", 16, Color.WHITE, true));
         c3.addView(text("1) กด \'เริ่มแชร์\' — ถ้าอยู่ Wi-Fi เดียวกัน คอมจะเจอมือถือเอง ถ้าอยู่คนละที่ ให้ใช้รหัสจับคู่ด้านบน\n"
-                + "2) เปิดโปรแกรม PROMAX USB Share บน Windows (ต้องติดตั้ง usbip-win2 ก่อน)\n"
+                + "2) เปิดโปรแกรม " + com.james.usbshare.Brand.NAME + " บน Windows (ต้องติดตั้ง usbip-win2 ก่อน)\n"
                 + "3) เลือกมือถือเครื่องนี้ → เลือกอุปกรณ์ → กด 'เชื่อมต่อ'\n"
                 + "4) ถ้ามีหน้าต่างขออนุญาต USB เด้งบนมือถือ ให้กด 'ตกลง'", 13, SILVER, false));
         Button battery = button("ปิดการประหยัดแบตให้แอพนี้", 0xFF2A313B);
@@ -326,7 +330,7 @@ public class MainActivity extends Activity {
     private void contactDeveloper() {
         String id = LicenseManager.deviceId(this);
         android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        cm.setPrimaryClip(android.content.ClipData.newPlainText("device id", "ขอซื้อคีย์ PROMAX USB Share (มือถือ)\nรหัสเครื่อง: " + id));
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("device id", "ขอซื้อคีย์ " + com.james.usbshare.Brand.NAME + " (มือถือ)\nรหัสเครื่อง: " + id));
         android.widget.Toast.makeText(this, "คัดลอกรหัสเครื่องแล้ว — วางในแชท LINE ได้เลย", android.widget.Toast.LENGTH_LONG).show();
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(com.james.usbshare.license.License.CONTACT_URL)));

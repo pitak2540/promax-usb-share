@@ -204,7 +204,7 @@ public class UsbShareService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_usb)
-                .setContentTitle("PROMAX USB Share")
+                .setContentTitle(com.james.usbshare.Brand.NAME)
                 .setContentText(text)
                 .setContentIntent(pi)
                 .setOngoing(true)

@@ -1,4 +1,9 @@
-﻿; PROMAX USB Share — Windows installer (Inno Setup 6)
+﻿; BRAND values written by tools/brand.py
+#define BRAND_NAME "PROMAX USB Share"
+#define BRAND_PUBLISHER "PROMAX"
+#define BRAND_FILE "PromaxUsbShare"
+#define BRAND_ID "A7D3F2B1-5E64-4C8A-9F10-PROMAXUSBSHARE"
+; Windows installer (Inno Setup 6) — names come from the BRAND defines above
 ; Installs the program, usbip-win2 and the cable drivers in one go.
 #ifndef AppVersion
   #define AppVersion "1.0.0"
@@ -6,21 +11,21 @@
 #include "payload\args.iss"
 
 [Setup]
-AppId={{A7D3F2B1-5E64-4C8A-9F10-PROMAXUSBSHARE}
-AppName=PROMAX USB Share
+AppId={{{#BRAND_ID}}
+AppName={#BRAND_NAME}
 AppVersion={#AppVersion}
-AppPublisher=PROMAX
-DefaultDirName={autopf}\PROMAX USB Share
-DefaultGroupName=PROMAX USB Share
+AppPublisher={#BRAND_PUBLISHER}
+DefaultDirName={autopf}\{#BRAND_NAME}
+DefaultGroupName={#BRAND_NAME}
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=..\desktop\icon.ico
-UninstallDisplayIcon={app}\PromaxUsbShare.exe
+UninstallDisplayIcon={app}\{#BRAND_FILE}.exe
 WizardStyle=modern
 OutputDir=..\dist
-OutputBaseFilename=PromaxUsbShare-Setup
+OutputBaseFilename={#BRAND_FILE}-Setup
 Compression=lzma2
 SolidCompression=yes
 
@@ -47,7 +52,7 @@ Name: "cp210x"; Description: "Silicon Labs CP210x"; GroupDescription: "ติด
 Name: "desktopicon"; Description: "สร้างไอคอนบนเดสก์ท็อป"; GroupDescription: "อื่นๆ:"
 
 [Files]
-Source: "..\dist\PromaxUsbShare\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\{#BRAND_FILE}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "payload\usbip-win2-setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: usbip
 #ifexist "payload\usbipd-win.msi"
 Source: "payload\usbipd-win.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: usbipd
@@ -69,8 +74,8 @@ Source: "payload\drivers\cp210x\*"; DestDir: "{tmp}\drivers\cp210x"; Flags: recu
 #endif
 
 [Icons]
-Name: "{group}\PROMAX USB Share"; Filename: "{app}\PromaxUsbShare.exe"
-Name: "{autodesktop}\PROMAX USB Share"; Filename: "{app}\PromaxUsbShare.exe"; Tasks: desktopicon
+Name: "{group}\{#BRAND_NAME}"; Filename: "{app}\{#BRAND_FILE}.exe"
+Name: "{autodesktop}\{#BRAND_NAME}"; Filename: "{app}\{#BRAND_FILE}.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{tmp}\usbip-win2-setup.exe"; Parameters: "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"; StatusMsg: "กำลังติดตั้ง usbip-win2..."; Tasks: usbip; Check: not UsbipInstalled
@@ -92,11 +97,11 @@ Filename: "{tmp}\CH341SER.EXE"; Parameters: "{#CH341_ARGS}"; StatusMsg: "กำ�
 #ifexist "payload\drivers\cp210x"
 Filename: "{sys}\pnputil.exe"; Parameters: "/add-driver ""{tmp}\drivers\cp210x\*.inf"" /subdirs /install"; StatusMsg: "กำลังติดตั้งไดรเวอร์ CP210x..."; Flags: runhidden; Tasks: cp210x
 #endif
-Filename: "{app}\PromaxUsbShare.exe"; Description: "เปิด PROMAX USB Share"; Flags: nowait postinstall skipifsilent; Check: not NeedsRestart
+Filename: "{app}\{#BRAND_FILE}.exe"; Description: "เปิด {#BRAND_NAME}"; Flags: nowait postinstall skipifsilent; Check: not NeedsRestart
 
 [UninstallRun]
 ; forget saved phones/PCs and pairing codes (license key and trial date are kept)
-Filename: "{app}\PromaxUsbShare.exe"; Parameters: "--clear-history"; RunOnceId: "ClearHistory"; Flags: waituntilterminated runhidden
+Filename: "{app}\{#BRAND_FILE}.exe"; Parameters: "--clear-history"; RunOnceId: "ClearHistory"; Flags: waituntilterminated runhidden
 
 [Code]
 var
