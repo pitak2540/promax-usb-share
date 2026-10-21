@@ -17,6 +17,8 @@
 //       RESUME_MS; the dropped side reconnects to the same id with &resume=1, both get
 //       "ready" again and exchange "resume <n>" (forwarded verbatim) to replay lost frames.
 //       Each side is told the other's protocol version with "peer <v>" just before "ready".
+//       v3 links also exchange "key <ECDH public key>" and then encrypt every frame end to end,
+//       so the relay only ever sees ciphertext.
 //       "ping" on a data link is answered with "pong"; "bye" closes the peer at once.
 //       Close codes to a v2 side: 4001 = replaced by your own resumed link, 4002 = session over.
 //   status        : https://<relay>/c/<CODE>/status
@@ -288,7 +290,7 @@ export class Room {
         try { ws.close(1000, "bye"); } catch (e) {}
         return;
       }
-      if (!msg.startsWith("resume ")) return; // only the resume handshake crosses the relay
+      if (!msg.startsWith("resume ") && !msg.startsWith("key ")) return; // only the resume / key handshake crosses the relay
     }
     const p = this.peer(ws);
     if (p) {

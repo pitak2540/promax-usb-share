@@ -135,7 +135,80 @@ public final class Relay {
     // =====================================================================
 
     /** Protocol version of the data link; the relay tells each side the other's version ("peer N"). */
-    static final int LINK_VERSION = 2;
+    static final int LINK_VERSION = 3; // 2 = resumable, 3 = resumable + end-to-end encrypted
+
+    /** End-to-end encryption of a link: ECDH P-256 key agreement through the relay, AES-256-GCM per frame. */
+    static final class E2E {
+        private final java.security.KeyPair pair;
+        private volatile javax.crypto.SecretKey key;
+        private final byte[] myPub;
+
+        E2E() throws java.security.GeneralSecurityException {
+            java.security.KeyPairGenerator g = java.security.KeyPairGenerator.getInstance("EC");
+            g.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+            pair = g.generateKeyPair();
+            myPub = pair.getPublic().getEncoded();
+        }
+
+        String publicKeyB64() { return java.util.Base64.getEncoder().encodeToString(myPub); }
+        boolean ready() { return key != null; }
+
+        /** Derives the session key from the peer's public key (same result on both sides). */
+        void accept(String peerPubB64) throws java.security.GeneralSecurityException {
+            byte[] peerPub = java.util.Base64.getDecoder().decode(peerPubB64.trim());
+            java.security.PublicKey pk = java.security.KeyFactory.getInstance("EC").generatePublic(new java.security.spec.X509EncodedKeySpec(peerPub));
+            javax.crypto.KeyAgreement ka = javax.crypto.KeyAgreement.getInstance("ECDH");
+            ka.init(pair.getPrivate());
+            ka.doPhase(pk, true);
+            byte[] shared = ka.generateSecret();
+            // HKDF-SHA256; the info binds the key to both public keys (order-independent)
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec("PROMAX-USB-link-v3".getBytes(StandardCharsets.US_ASCII), "HmacSHA256"));
+            byte[] prk = mac.doFinal(shared);
+            mac.init(new javax.crypto.spec.SecretKeySpec(prk, "HmacSHA256"));
+            byte[] a = myPub, b = peerPub;
+            if (lexCompare(a, b) > 0) { byte[] t = a; a = b; b = t; }
+            mac.update(a); mac.update(b); mac.update((byte) 1);
+            key = new javax.crypto.spec.SecretKeySpec(mac.doFinal(), "AES");
+        }
+
+        /** Arrays.compare needs Android 13; this works everywhere. */
+        private static int lexCompare(byte[] a, byte[] b) {
+            int n = Math.min(a.length, b.length);
+            for (int i = 0; i < n; i++) {
+                int d = (a[i] & 0xff) - (b[i] & 0xff);
+                if (d != 0) return d;
+            }
+            return a.length - b.length;
+        }
+
+        private static byte[] nonce(int dir, long seq) {
+            byte[] n = new byte[12];
+            n[0] = (byte) dir;
+            for (int i = 0; i < 8; i++) n[4 + i] = (byte) (seq >>> (56 - 8 * i));
+            return n;
+        }
+
+        /** Encrypts {@code plain[off..off+len)}; the 4-byte seq header is authenticated but not encrypted. */
+        byte[] seal(int dir, long seq, byte[] plain, int off, int len) throws java.security.GeneralSecurityException {
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.ENCRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, nonce(dir, seq)));
+            byte[] hdr = {(byte) (seq >>> 24), (byte) (seq >>> 16), (byte) (seq >>> 8), (byte) seq};
+            c.updateAAD(hdr);
+            byte[] ct = c.doFinal(plain, off, len);
+            byte[] out = new byte[4 + ct.length];
+            System.arraycopy(hdr, 0, out, 0, 4);
+            System.arraycopy(ct, 0, out, 4, ct.length);
+            return out;
+        }
+
+        byte[] open(int dir, long seq, byte[] frame, int len) throws java.security.GeneralSecurityException {
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.DECRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, nonce(dir, seq)));
+            c.updateAAD(frame, 0, 4);
+            return c.doFinal(frame, 4, len - 4);
+        }
+    }
 
     /**
      * One USB/IP TCP connection carried over the relay. Every frame carries a sequence number and is
@@ -172,6 +245,9 @@ public final class Relay {
         private volatile boolean finished;
         private volatile boolean legacy; // peer is v1: no seq header, no resume
         private int resumes;
+        private final E2E e2e;
+        private final int dir;          // nonce direction: 1 = PC -> phone, 2 = phone -> PC
+        private volatile boolean encrypted; // peer is v3+: frames are sealed
 
         /** Called while the link is in use so callers (tests, network-change hooks) can drop it. */
         private static final java.util.Set<Link> LIVE = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
@@ -182,6 +258,18 @@ public final class Relay {
             this.reconnector = reconnector;
             this.who = who;
             this.log = log;
+            this.dir = who.startsWith("pc-") ? 1 : 2;
+            E2E e = null;
+            try { e = new E2E(); } catch (java.security.GeneralSecurityException ex) { log.accept("เข้ารหัสไม่ได้: " + ex.getMessage()); }
+            this.e2e = e;
+        }
+
+        boolean isEncrypted() { return encrypted && e2e != null && e2e.ready(); }
+
+        static boolean allEncrypted() {
+            if (LIVE.isEmpty()) return false;
+            for (Link l : LIVE) if (!l.isEncrypted()) return false;
+            return true;
         }
 
         /** Simulates a network drop: closes every live data WebSocket; links must resume by themselves. */
@@ -266,6 +354,7 @@ public final class Relay {
         private void setPeerVersion(int v) {
             peerVersion = v;
             legacy = v < 2;
+            encrypted = v >= 3 && e2e != null;
             if (legacy) open = true; // nothing to negotiate with an old peer
         }
 
@@ -284,7 +373,7 @@ public final class Relay {
                         w.sendText("ping");
                         boolean askAgain;
                         synchronized (lock) { askAgain = readySeen && !open && !legacy; }
-                        if (askAgain) w.sendText("resume " + recvSeq); // peer may not have been there yet
+                        if (askAgain) handshake(w); // peer may not have been there yet
                     } catch (Exception e) {
                         w.close();
                         return;
@@ -297,7 +386,7 @@ public final class Relay {
             boolean startNow;
             synchronized (lock) { startNow = readySeen && !legacy; }
             if (startNow) {
-                try { w.sendText("resume " + recvSeq); } catch (IOException e) { w.close(); }
+                try { handshake(w); } catch (IOException e) { w.close(); }
             }
             w.readLoop(new MiniWebSocket.Listener() {
                 @Override public void onText(String t) {
@@ -305,12 +394,20 @@ public final class Relay {
                         if (t.equals("ready") || t.startsWith("ready ")) {
                             boolean send;
                             synchronized (lock) { readySeen = true; send = !legacy; }
-                            if (send) w.sendText("resume " + recvSeq);
+                            if (send) handshake(w);
                         } else if (t.startsWith("peer ")) {
                             int v = 1;
                             try { v = Integer.parseInt(t.substring(5).trim()); } catch (NumberFormatException ignored) {}
                             synchronized (lock) { setPeerVersion(v); }
+                        } else if (t.startsWith("key ")) {
+                            if (e2e != null) {
+                                try { e2e.accept(t.substring(4)); } catch (java.security.GeneralSecurityException ex) {
+                                    log.accept("กุญแจเข้ารหัสจากอีกฝั่งไม่ถูกต้อง — ตัดการเชื่อมต่อ");
+                                    finish(true);
+                                }
+                            }
                         } else if (t.startsWith("resume ")) {
+                            if (encrypted && !e2e.ready()) { w.close(); return; } // peer skipped the key: never fall back to plain
                             long peerRecv = Long.parseLong(t.substring(7).trim());
                             if (!replay(w, peerRecv)) {
                                 log.accept("ต่อกลับไม่ได้ — ข้อมูลที่ค้างระหว่างหลุดมากเกินไป");
@@ -332,7 +429,16 @@ public final class Relay {
                                 if (seq <= recvSeq) return; // replayed frame we already have
                                 recvSeq = seq;
                             }
-                            tcpOut.write(d, 4, len - 4);
+                            if (encrypted) {
+                                if (!e2e.ready()) { finish(true); return; }
+                                byte[] plain;
+                                try { plain = e2e.open(3 - dir, seq, d, len); } catch (java.security.GeneralSecurityException ex) {
+                                    log.accept("ข้อมูลถูกแก้ไขระหว่างทาง — ตัดการเชื่อมต่อ");
+                                    finish(true);
+                                    return;
+                                }
+                                tcpOut.write(plain);
+                            } else tcpOut.write(d, 4, len - 4);
                         }
                         tcpOut.flush();
                     } catch (IOException e) {
@@ -349,6 +455,21 @@ public final class Relay {
             });
         }
 
+        /** "key <pub>" (v3) then "resume <n>": both sides do this after every (re)connection. */
+        private void handshake(MiniWebSocket w) throws IOException {
+            if (e2e != null && peerVersion >= 3) w.sendText("key " + e2e.publicKeyB64());
+            w.sendText("resume " + recvSeq);
+        }
+
+        /** Sends one buffered frame (plain seq header + payload), sealing it when the link is encrypted. */
+        private void send(MiniWebSocket w, byte[] f) throws IOException {
+            if (!encrypted) { w.sendBinary(f, 0, f.length); return; }
+            long seq = ((long) (f[0] & 0xff) << 24) | ((f[1] & 0xff) << 16) | ((f[2] & 0xff) << 8) | (f[3] & 0xff);
+            byte[] sealed;
+            try { sealed = e2e.seal(dir, seq, f, 4, f.length - 4); } catch (java.security.GeneralSecurityException ex) { throw new IOException(ex); }
+            w.sendBinary(sealed, 0, sealed.length);
+        }
+
         /** Replays every frame the peer has not received yet; returns false when they are no longer buffered. */
         private boolean replay(MiniWebSocket w, long peerRecv) throws IOException {
             synchronized (lock) {
@@ -356,10 +477,7 @@ public final class Relay {
                 long skip = peerRecv - firstSeq + 1;
                 java.util.Iterator<byte[]> it = sent.iterator();
                 while (skip-- > 0 && it.hasNext()) it.next();
-                while (it.hasNext()) {
-                    byte[] f = it.next();
-                    w.sendBinary(f, 0, f.length);
-                }
+                while (it.hasNext()) send(w, it.next());
                 open = true;
             }
             return true;
@@ -390,7 +508,7 @@ public final class Relay {
                         if (open && ws != null) w = ws;
                     }
                     if (w != null) {
-                        try { w.sendBinary(f, 0, f.length); } catch (IOException e) { w.close(); } // frame stays buffered; replayed after resume
+                        try { send(w, f); } catch (IOException e) { w.close(); } // frame stays buffered; replayed after resume
                     }
                 }
             } catch (IOException ignored) {

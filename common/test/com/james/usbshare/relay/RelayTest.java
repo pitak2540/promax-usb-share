@@ -115,6 +115,7 @@ public class RelayTest {
 
         // ---- resume: the data WebSockets drop (like a mobile-data handover) while the device is in use
         check(Relay.Link.liveCount() == 2, "two live data links (pc + phone)");
+        check(Relay.Link.allEncrypted(), "both links are end-to-end encrypted (ECDH + AES-GCM)");
         Relay.Link.drop("ph-"); // phone side only
         out.write(Proto.encodeCmdSubmit(20, devid, Proto.DIR_IN, 0, 0x200, 18, setup, null)); // sent while the phone is away
         in.readFully(h);
