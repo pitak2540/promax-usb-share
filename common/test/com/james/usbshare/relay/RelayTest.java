@@ -43,19 +43,24 @@ public class RelayTest {
         ServerTest.FakeBackend fb = new ServerTest.FakeBackend();
         UsbIpServer srv = new UsbIpServer(fb, 0);
         srv.start();
-        // a forged key must be refused by the relay itself
-        Relay.Phone forged = new Relay.Phone(relay, code, "Forged", srv.getPort(), m -> System.out.println("  [forged] " + m))
-                .credentials("JUS1-AFBV4-Y5WMZ-HQWHJ-AAAAU-BABYY-QF5NU-YFF5M-NX452-DY5GH-7WK97-XUXGM-L826H-47W77-ZRSVW-WKWX9-6XAJR-SMTNJ-Y62BJ-PCFFZ-USG64-E5NE5-UKAHY-3BJ4C-RF55P-8XLT", phoneDev);
-        forged.start();
-        for (int i = 0; i < 50 && forged.lastError().isEmpty(); i++) Thread.sleep(100);
-        check(!forged.isConnected() && !forged.lastError().isEmpty(), "relay refuses a forged key: " + forged.lastError());
-        forged.stop();
         Relay.Phone phone = new Relay.Phone(relay, code, "Test Phone ทดสอบ", srv.getPort(), m -> System.out.println("  [phone] " + m)).credentials(null, phoneDev);
         phone.start();
         for (int i = 0; i < 50 && !phone.isConnected(); i++) Thread.sleep(100);
         check(phone.isConnected(), "phone control connected");
         Relay.Status st = Relay.status(relay, code);
         check(st.online && st.name.startsWith("Test Phone"), "status online with name: " + st.name);
+
+        // a master (PC) with a forged key is refused by the relay itself (phones share without a key)
+        java.util.List<String> flog = new java.util.concurrent.CopyOnWriteArrayList<>();
+        Relay.Forwarder forged = new Relay.Forwarder(relay, code, flog::add)
+                .credentials("JUS1-AFBV4-Y5WMZ-HQWHJ-AAAAU-BABYY-QF5NU-YFF5M-NX452-DY5GH-7WK97-XUXGM-L826H-47W77-ZRSVW-WKWX9-6XAJR-SMTNJ-Y62BJ-PCFFZ-USG64-E5NE5-UKAHY-3BJ4C-RF55P-8XLT", pcDev);
+        forged.start(3300);
+        try (Socket fs = new Socket("127.0.0.1", forged.port())) {
+            fs.setSoTimeout(8000);
+            fs.getOutputStream().write(Proto.encodeOpHeader(Proto.OP_REQ_DEVLIST, 0));
+            check(fs.getInputStream().read() == -1 && flog.stream().anyMatch(m -> m.contains("ไม่อนุญาต")), "relay refuses a master with a forged key: " + flog);
+        }
+        forged.stop();
 
         long t0 = System.nanoTime();
         try (Socket s = new Socket("127.0.0.1", port)) {
@@ -107,6 +112,45 @@ public class RelayTest {
         hb = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN);
         in.readFully(new byte[hb.getInt(0x18)]);
         check(hb.getInt(4) == 9 && hb.getInt(0x18) == 18, "device session survives phone control reconnect");
+
+        // ---- resume: the data WebSockets drop (like a mobile-data handover) while the device is in use
+        check(Relay.Link.liveCount() == 2, "two live data links (pc + phone)");
+        Relay.Link.drop("ph-"); // phone side only
+        out.write(Proto.encodeCmdSubmit(20, devid, Proto.DIR_IN, 0, 0x200, 18, setup, null)); // sent while the phone is away
+        in.readFully(h);
+        hb = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN);
+        in.readFully(new byte[hb.getInt(0x18)]);
+        check(hb.getInt(4) == 20 && hb.getInt(0x18) == 18, "URB answered after the phone's data link dropped and resumed");
+
+        Relay.Link.drop("pc-"); // PC side only
+        Thread.sleep(50);
+        out.write(Proto.encodeCmdSubmit(21, devid, Proto.DIR_IN, 0, 0x200, 18, setup, null));
+        in.readFully(h);
+        hb = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN);
+        in.readFully(new byte[hb.getInt(0x18)]);
+        check(hb.getInt(4) == 21 && hb.getInt(0x18) == 18, "URB answered after the PC's data link dropped and resumed");
+
+        Relay.Link.dropAll(); // both at once (phone and PC both lost the network)
+        out.write(Proto.encodeCmdSubmit(22, devid, Proto.DIR_IN, 0, 0x200, 18, setup, null));
+        in.readFully(h);
+        hb = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN);
+        in.readFully(new byte[hb.getInt(0x18)]);
+        check(hb.getInt(4) == 22 && hb.getInt(0x18) == 18, "URB answered after both data links dropped and resumed");
+
+        // drop in the middle of a 300 KB transfer: frames in flight are lost and must be replayed in order
+        byte[] huge = new byte[300000];
+        for (int i = 0; i < huge.length; i++) huge[i] = (byte) (i * 13 + (i >> 8));
+        Thread dropper = new Thread(() -> { try { Thread.sleep(3); } catch (InterruptedException ignored) {} Relay.Link.dropAll(); });
+        dropper.start();
+        out.write(Proto.encodeCmdSubmit(23, devid, Proto.DIR_OUT, 1, 0, huge.length, null, huge));
+        in.readFully(h);
+        out.write(Proto.encodeCmdSubmit(24, devid, Proto.DIR_IN, 1, 0x200, huge.length, null, null));
+        in.readFully(h);
+        hb = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN);
+        byte[] back = new byte[hb.getInt(0x18)];
+        in.readFully(back);
+        check(Arrays.equals(back, huge), "300 KB loopback intact across a mid-transfer drop (resumes so far: " + Relay.Link.totalResumes() + ")");
+        check(Relay.Link.liveCount() == 2 && Relay.Link.totalResumes() >= 4, "links resumed instead of reconnecting from scratch");
 
         // bulk loopback with a 40 KB payload (crosses frame sizes)
         byte[] big = new byte[40000];

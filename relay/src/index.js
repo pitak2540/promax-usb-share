@@ -1,16 +1,33 @@
-// JAMES USB Share relay — pairs a phone and a PC by a pairing code so USB/IP
+// PROMAX USB Share relay — pairs a phone and a PC by a pairing code so USB/IP
 // can cross networks (mobile data, different Wi-Fi, NAT). Each USB/IP TCP
 // connection from the PC becomes one WebSocket pair through a Durable Object.
 //
-//   phone control : wss://<relay>/p/<CODE>/ctl?name=<phone name>   (kept open)
-//   PC connection : wss://<relay>/c/<CODE>/data?id=<ID>
-//       relay -> phone control: "open <ID>"
-//   phone data    : wss://<relay>/p/<CODE>/data?id=<ID>
+// Licensing model: the "master" (เครื่องแม่) is the licensed PC that attaches devices; its
+// CODE is its device id. Any number of "children" (เครื่องลูก: phones / PCs that only
+// share USB, no key needed) join the master's room by typing that code.
+//
+//   child control : wss://<relay>/p/<CODE>/ctl?name=<name>&dev=<child id>   (kept open, many per room)
+//   PC connection : wss://<relay>/c/<CODE>/data?id=<ID>&child=<child id>&lic=..&dev=..
+//       relay -> child control: "open <ID>"
+//   child data    : wss://<relay>/p/<CODE>/data?id=<ID>
 //       relay -> PC: "ready", then binary frames are forwarded both ways.
-//   status        : https://<relay>/c/<CODE>/status  -> {"online":true,"name":"..."}
+//   P2P (optional): the PC adds &p2p=<offer>, the relay sends "open <ID> <offer>" to children
+//       that connected with &p2p=1; the child answers with &p2p=<answer> -> PC gets "ready <answer>".
+//   Resume (v2 links, &v=2): when one side's WebSocket drops, the other side is kept for
+//       RESUME_MS; the dropped side reconnects to the same id with &resume=1, both get
+//       "ready" again and exchange "resume <n>" (forwarded verbatim) to replay lost frames.
+//       Each side is told the other's protocol version with "peer <v>" just before "ready".
+//       "ping" on a data link is answered with "pong"; "bye" closes the peer at once.
+//       Close codes to a v2 side: 4001 = replaced by your own resumed link, 4002 = session over.
+//   status        : https://<relay>/c/<CODE>/status
+//       -> {"online":true,"name":"...","children":[{"id":"..","name":"..","online":true}]}
 
 const PATH = /^\/(p|c)\/([A-Z0-9]{6,16})\/(ctl|data|status)$/;
 const ID = /^[A-Za-z0-9]{4,32}$/;
+// P2P offer/answer: "<token hex16>-<ip:port>_<ip:port>..." (IPv4 literals only). The relay just
+// passes addresses between master and child; the two then connect directly over UDP.
+const P2P = /^[0-9a-f]{16}-[0-9.:_]{0,400}$/;
+const RESUME_MS = 30000; // how long a half-open session waits for the dropped side to come back
 
 // ---------------------------------------------------------------- licensing
 // Same public key as the apps (License.java). Keys are verified here too, so a patched
@@ -91,11 +108,17 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response("JAMES USB Share relay OK\n", { headers: { "content-type": "text/plain" } });
+      return new Response("PROMAX USB Share relay OK\n", { headers: { "content-type": "text/plain" } });
     }
     const m = url.pathname.match(PATH);
     if (!m) return new Response("not found\n", { status: 404 });
-    if ((m[1] === "p" && m[3] === "ctl") || (m[1] === "c" && m[3] === "data")) {
+    if (m[1] === "p" && m[3] === "ctl") {
+      // children share for free; only a revoked device is refused
+      const d = (url.searchParams.get("dev") || "").toLowerCase();
+      if (/^[0-9a-f]{16}$/.test(d) && REVOKED.has(base32(Uint8Array.from(d.match(/../g).map((h) => parseInt(h, 16))))))
+        return new Response("เครื่องนี้ถูกระงับ", { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+    if (m[1] === "c" && m[3] === "data") {
       const why = await checkLicense(url, env);
       if (why) return new Response(why, { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
     }
@@ -107,6 +130,25 @@ export default {
 export class Room {
   constructor(state, env) {
     this.state = state;
+    this.grace = new Map(); // tag -> timer closing the peer if that side does not come back
+  }
+
+  /** Open socket with this tag, if any (closing ones are skipped). */
+  live(tag) {
+    return this.state.getWebSockets(tag).find((w) => w.readyState === undefined || w.readyState === 1) || null;
+  }
+
+  version(ws) {
+    const a = ws && ws.deserializeAttachment();
+    return (a && a.v) || 1;
+  }
+
+  /** Both sides are present: tell each the other's version, then "ready". */
+  pairUp(pc, ph, answer) {
+    try { if (this.version(pc) >= 2) pc.send("peer " + this.version(ph)); } catch (e) {}
+    try { if (this.version(ph) >= 2) ph.send("peer " + this.version(pc)); } catch (e) {}
+    try { pc.send(answer ? "ready " + answer : "ready"); } catch (e) {}
+    try { ph.send("ready"); } catch (e) {}
   }
 
   async fetch(req) {
@@ -119,16 +161,10 @@ export class Room {
     const [, side, , kind] = url.pathname.split("/");
 
     if (kind === "status") {
-      const c = this.newestCtl();
-      let name = "";
-      let online = false;
-      if (c) {
-        const a = c.deserializeAttachment();
-        name = (a && a.name) || "";
-        // the phone pings every 25 s; no ping for 70 s means its link is stale
-        online = !!a && Date.now() - (a.seen || 0) < 70000;
-      }
-      return Response.json({ online, name });
+      const children = this.children();
+      const on = children.filter((c) => c.online);
+      const first = on[0] || children[0];
+      return Response.json({ online: on.length > 0, name: first ? first.name : "", children });
     }
 
     if (req.headers.get("Upgrade") !== "websocket") {
@@ -136,29 +172,51 @@ export class Room {
     }
 
     const id = url.searchParams.get("id") || "";
+    const v = Math.max(1, Math.min(9, parseInt(url.searchParams.get("v") || "1", 10) || 1));
+    const resume = url.searchParams.get("resume") === "1";
     let tag, attachment, notify;
 
     if (side === "p" && kind === "ctl") {
+      let dev = (url.searchParams.get("dev") || "").toLowerCase();
+      if (!/^[0-9a-f]{16}$/.test(dev)) dev = "anon";
+      // the same child reconnecting replaces its old link; other children stay
       for (const old of this.state.getWebSockets("ctl")) {
-        try { old.close(4000, "replaced by a newer phone connection"); } catch (e) {}
+        const oa = old.deserializeAttachment();
+        if (oa && (oa.dev || "anon") === dev) {
+          try { old.close(4000, "replaced by a newer connection from this device"); } catch (e) {}
+        }
       }
       tag = "ctl";
-      attachment = { role: "ctl", name: (url.searchParams.get("name") || "").slice(0, 80), seen: Date.now(), since: Date.now() };
+      attachment = { role: "ctl", dev, p2p: url.searchParams.get("p2p") === "1", name: (url.searchParams.get("name") || "").slice(0, 80), seen: Date.now(), since: Date.now() };
     } else if (side === "c" && kind === "data") {
       if (!ID.test(id)) return new Response("bad id\n", { status: 400 });
-      const c = this.newestCtl();
-      const ca = c ? c.deserializeAttachment() : null;
-      if (!c || !ca || Date.now() - (ca.seen || 0) > 70000) return new Response("phone offline\n", { status: 503 });
       tag = "pc:" + id;
-      attachment = { role: "pc", id };
-      notify = () => c.send("open " + id);
+      attachment = { role: "pc", id, v };
+      if (resume) {
+        // the PC's link dropped and is back: pair with the child's link if it is still there,
+        // otherwise wait for the child to resume as well (webSocketClose gave it RESUME_MS)
+        const old = this.live(tag);
+        if (old) { try { old.close(4001, "replaced by a resumed link"); } catch (e) {} }
+        const ph = this.live("ph:" + id);
+        if (ph) notify = (me) => this.pairUp(me, ph, null);
+      } else {
+        const child = (url.searchParams.get("child") || "").toLowerCase() || null;
+        const c = this.newestCtl(child);
+        const ca = c ? c.deserializeAttachment() : null;
+        if (!c || !ca || Date.now() - (ca.seen || 0) > 70000) return new Response("phone offline\n", { status: 503 });
+        const offer = url.searchParams.get("p2p") || "";
+        notify = () => c.send("open " + id + (ca.p2p && P2P.test(offer) ? " " + offer : ""));
+      }
     } else if (side === "p" && kind === "data") {
       if (!ID.test(id)) return new Response("bad id\n", { status: 400 });
-      const pcs = this.state.getWebSockets("pc:" + id);
-      if (!pcs.length) return new Response("pc gone\n", { status: 410 });
       tag = "ph:" + id;
-      attachment = { role: "ph", id };
-      notify = () => pcs[0].send("ready");
+      attachment = { role: "ph", id, v };
+      const old = this.live(tag);
+      if (old) { try { old.close(4001, "replaced by a resumed link"); } catch (e) {} }
+      const pc = this.live("pc:" + id);
+      if (!pc && !resume) return new Response("pc gone\n", { status: 410 });
+      const answer = url.searchParams.get("p2p") || "";
+      if (pc) notify = (me) => this.pairUp(pc, me, !resume && P2P.test(answer) ? answer : null);
     } else {
       return new Response("bad request\n", { status: 400 });
     }
@@ -167,18 +225,36 @@ export class Room {
     const [client, server] = Object.values(pair);
     this.state.acceptWebSocket(server, [tag]);
     server.serializeAttachment(attachment);
+    const g = this.grace.get(tag);
+    if (g) { clearTimeout(g); this.grace.delete(tag); }
     if (notify) {
-      try { notify(); } catch (e) {}
+      try { notify(server); } catch (e) {}
     }
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** The phone's most recent control link (older ones may still be closing). */
-  newestCtl() {
+  /** Every child in this room (newest link per device); online = pinged in the last 70 s. */
+  children() {
+    const by = new Map();
+    for (const w of this.state.getWebSockets("ctl")) {
+      if (w.readyState !== undefined && w.readyState !== 1) continue;
+      const a = w.deserializeAttachment();
+      if (!a) continue;
+      const id = a.dev || "anon";
+      const prev = by.get(id);
+      if (!prev || (a.since || 0) > prev.since)
+        by.set(id, { id, name: a.name || "", online: Date.now() - (a.seen || 0) < 70000, since: a.since || 0 });
+    }
+    return [...by.values()].sort((x, y) => x.since - y.since).map(({ id, name, online }) => ({ id, name, online }));
+  }
+
+  /** Most recent control link (of one child, or of any child when child is null). */
+  newestCtl(child) {
     let best = null, bestT = -1;
     for (const w of this.state.getWebSockets("ctl")) {
       if (w.readyState !== undefined && w.readyState !== 1) continue; // 1 = OPEN
       const a = w.deserializeAttachment();
+      if (child && (!a || (a.dev || "anon") !== child)) continue;
       const t = (a && (a.since || a.seen)) || 0;
       if (t > bestT) { best = w; bestT = t; }
     }
@@ -188,8 +264,8 @@ export class Room {
   peer(ws) {
     const a = ws.deserializeAttachment();
     if (!a) return null;
-    if (a.role === "pc") return this.state.getWebSockets("ph:" + a.id)[0] || null;
-    if (a.role === "ph") return this.state.getWebSockets("pc:" + a.id)[0] || null;
+    if (a.role === "pc") return this.live("ph:" + a.id);
+    if (a.role === "ph") return this.live("pc:" + a.id);
     return null;
   }
 
@@ -204,7 +280,16 @@ export class Room {
       }
       return;
     }
-    if (typeof msg === "string") return; // only binary payload is forwarded
+    if (typeof msg === "string") {
+      if (msg === "ping") { try { ws.send("pong"); } catch (e) {} return; }
+      if (msg === "bye") { // the local USB/IP side closed: this session is over for both
+        const p = this.peer(ws);
+        if (p) { try { p.close(4002, "peer closed"); } catch (e) {} } // 4002 = final, do not resume
+        try { ws.close(1000, "bye"); } catch (e) {}
+        return;
+      }
+      if (!msg.startsWith("resume ")) return; // only the resume handshake crosses the relay
+    }
     const p = this.peer(ws);
     if (p) {
       try { p.send(msg); } catch (e) { try { ws.close(1011, "peer send failed"); } catch (e2) {} }
@@ -219,8 +304,25 @@ export class Room {
       // paired keep working and close on their own; a PC still waiting times out by itself.
       return;
     }
+    const tag = (a.role === "pc" ? "pc:" : "ph:") + a.id;
+    const peerTag = (a.role === "pc" ? "ph:" : "pc:") + a.id;
+    const replacement = this.live(tag);
+    if (replacement && replacement !== ws) return; // a resumed link already took over
     const p = this.peer(ws);
-    if (p) { try { p.close(1000, "peer closed"); } catch (e) {} }
+    if (!p) return;
+    if ((a.v || 1) < 2 || this.version(p) < 2) {
+      try { p.close(1000, "peer closed"); } catch (e) {} // old protocol: no resume possible
+      return;
+    }
+    // v2: keep the other side for a while so the dropped side can resume into the same session
+    const old = this.grace.get(tag);
+    if (old) clearTimeout(old);
+    this.grace.set(tag, setTimeout(() => {
+      this.grace.delete(tag);
+      if (this.live(tag)) return; // it came back
+      const peer = this.live(peerTag);
+      if (peer) { try { peer.close(4002, "peer gone"); } catch (e) {} }
+    }, RESUME_MS));
   }
 
   async webSocketClose(ws, code, reason) {

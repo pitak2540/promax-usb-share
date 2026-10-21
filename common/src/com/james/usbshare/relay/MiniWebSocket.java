@@ -209,10 +209,21 @@ public final class MiniWebSocket {
      * Always ends with exactly one onClose call.
      */
     public void readLoop(Listener l) {
+        while (readOne(l)) { /* keep reading */ }
+    }
+
+    private ByteArrayOutputStream frag;
+    private int fragOpcode;
+    private boolean closeDelivered;
+
+    /**
+     * Reads one complete message (text or binary) and delivers it; control frames are handled on
+     * the way. Returns false once the connection is closed — onClose has then been called exactly once.
+     */
+    public boolean readOne(Listener l) {
+        if (closeDelivered) return false;
         int closeCode = 1006;
         String closeReason = "connection lost";
-        ByteArrayOutputStream frag = null;
-        int fragOpcode = 0;
         try {
             while (true) {
                 int b0 = in.readUnsignedByte();
@@ -251,19 +262,26 @@ public final class MiniWebSocket {
                         byte[] all = frag.toByteArray();
                         frag = null;
                         deliver(l, fragOpcode, all);
+                        return true;
                     }
                 } else if (opcode == 0x1 || opcode == 0x2) {
-                    if (fin) deliver(l, opcode, payload);
-                    else { frag = new ByteArrayOutputStream(); frag.write(payload); fragOpcode = opcode; }
+                    if (fin) { deliver(l, opcode, payload); return true; }
+                    frag = new ByteArrayOutputStream();
+                    frag.write(payload);
+                    fragOpcode = opcode;
                 }
             }
+        } catch (java.net.SocketTimeoutException e) {
+            closeCode = 1006;
+            closeReason = "read timeout";
         } catch (IOException e) {
             if (closed) { closeCode = 1000; closeReason = "closed"; }
-        } finally {
-            closed = true;
-            try { socket.close(); } catch (IOException ignored) {}
-            l.onClose(closeCode, closeReason);
         }
+        closed = true;
+        closeDelivered = true;
+        try { socket.close(); } catch (IOException ignored) {}
+        l.onClose(closeCode, closeReason);
+        return false;
     }
 
     private static void deliver(Listener l, int opcode, byte[] data) {

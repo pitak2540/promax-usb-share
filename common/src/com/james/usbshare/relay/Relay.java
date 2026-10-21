@@ -1,6 +1,7 @@
 package com.james.usbshare.relay;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -130,6 +131,287 @@ public final class Relay {
     }
 
     // =====================================================================
+    // Resumable data link (survives a dropped WebSocket — mobile data handover, Wi-Fi blip)
+    // =====================================================================
+
+    /** Protocol version of the data link; the relay tells each side the other's version ("peer N"). */
+    static final int LINK_VERSION = 2;
+
+    /**
+     * One USB/IP TCP connection carried over the relay. Every frame carries a sequence number and is
+     * kept until the other side has certainly received it; when the WebSocket drops, the TCP side is
+     * kept open, a new WebSocket is opened to the same session and both ends exchange
+     * "resume &lt;last received&gt;" so missing frames are replayed. Windows never sees the device go away
+     * as long as the link comes back within {@link #WINDOW_MS}. Against a peer that runs the old
+     * protocol (v1) the link works exactly like before: raw frames, no resume.
+     */
+    static final class Link {
+        interface Connector { MiniWebSocket connect() throws IOException; }
+
+        static final int WINDOW_MS = 30000;      // how long a dropped link may stay away
+        static final int PING_MS = 5000;         // keep-alive on the data link
+        static final int READ_TIMEOUT_MS = 16000; // 3 missed pongs = dead link
+        static final int BUF_MAX = 4 << 20;      // replay buffer per direction
+
+        private final Socket tcp;
+        private final OutputStream tcpOut;
+        private final Connector reconnector;
+        private final Consumer<String> log;
+        private final String who;
+
+        private final Object lock = new Object();
+        private final java.util.ArrayDeque<byte[]> sent = new java.util.ArrayDeque<>(); // frames with header, oldest first
+        private long sentBytes;
+        private long firstSeq = 1;   // seq of sent.peekFirst()
+        private long sendSeq;        // last seq handed out
+        private long recvSeq;        // last seq written to tcp
+        private MiniWebSocket ws;
+        private boolean open;        // handshake done on the current ws -> may send
+        private boolean readySeen;
+        private int peerVersion = LINK_VERSION;
+        private volatile boolean finished;
+        private volatile boolean legacy; // peer is v1: no seq header, no resume
+        private int resumes;
+
+        /** Called while the link is in use so callers (tests, network-change hooks) can drop it. */
+        private static final java.util.Set<Link> LIVE = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+
+        Link(Socket tcp, Connector reconnector, String who, Consumer<String> log) throws IOException {
+            this.tcp = tcp;
+            this.tcpOut = tcp.getOutputStream();
+            this.reconnector = reconnector;
+            this.who = who;
+            this.log = log;
+        }
+
+        /** Simulates a network drop: closes every live data WebSocket; links must resume by themselves. */
+        static void dropAll() {
+            for (Link l : LIVE) l.kick();
+        }
+
+        /** Drops only the links whose name starts with {@code prefix} ("ph-" = phone side, "pc-" = PC side). */
+        static void drop(String prefix) {
+            for (Link l : LIVE) if (l.who.startsWith(prefix)) l.kick();
+        }
+
+        static int totalResumes() {
+            int n = 0;
+            for (Link l : LIVE) n += l.resumes;
+            return n;
+        }
+
+        static int liveCount() { return LIVE.size(); }
+
+        /** Drops the current WebSocket (e.g. after a network change) so the link resumes at once. */
+        void kick() {
+            MiniWebSocket w;
+            synchronized (lock) { w = ws; }
+            if (w != null) {
+                Thread t = new Thread(w::close, "link-kick");
+                t.setDaemon(true);
+                t.start();
+            }
+        }
+
+        /**
+         * Runs the link on the calling thread until the TCP side closes or the link is lost for good.
+         * @param first      the WebSocket already connected to the relay
+         * @param readySeen  true if "ready" was already consumed by the caller (PC side)
+         * @param peerVersion the peer's protocol version if already known, else 0
+         */
+        void run(MiniWebSocket first, boolean readySeen, int peerVersion) {
+            LIVE.add(this);
+            try {
+                synchronized (lock) {
+                    this.readySeen = readySeen;
+                    if (peerVersion > 0) setPeerVersion(peerVersion);
+                }
+                Thread reader = new Thread(this::tcpToLink, "link-up-" + who);
+                reader.setDaemon(true);
+                reader.start();
+                MiniWebSocket cur = first;
+                while (!finished) {
+                    serve(cur);
+                    if (finished || legacy) break;
+                    long lostAt = System.currentTimeMillis();
+                    log.accept("สัญญาณหลุด — กำลังต่อกลับเข้าเซสชันเดิม (อุปกรณ์ยังค้างอยู่บนคอม)");
+                    cur = null;
+                    int delay = 300;
+                    while (!finished && System.currentTimeMillis() - lostAt < WINDOW_MS) {
+                        try { Thread.sleep(delay); } catch (InterruptedException e) { break; }
+                        delay = Math.min(delay * 2, 2000);
+                        try {
+                            cur = reconnector.connect();
+                            break;
+                        } catch (MiniWebSocket.HttpStatusException e) {
+                            if (e.status == 403) { log.accept("Relay ไม่อนุญาต: " + e.body.trim()); break; }
+                            // 503 / 410: the other side is not back yet — keep trying inside the window
+                        } catch (Exception ignored) {}
+                    }
+                    if (cur == null) {
+                        log.accept("ต่อกลับไม่ได้ภายใน " + (WINDOW_MS / 1000) + " วินาที — ตัดการเชื่อมต่ออุปกรณ์");
+                        break;
+                    }
+                    synchronized (lock) { this.readySeen = false; }
+                    resumes++;
+                }
+            } finally {
+                LIVE.remove(this);
+                finish(false);
+            }
+        }
+
+        int resumes() { return resumes; }
+
+        private void setPeerVersion(int v) {
+            peerVersion = v;
+            legacy = v < 2;
+            if (legacy) open = true; // nothing to negotiate with an old peer
+        }
+
+        /** Serves one WebSocket until it closes. */
+        private void serve(MiniWebSocket w) {
+            synchronized (lock) {
+                ws = w;
+                open = legacy;
+            }
+            try { w.setReadTimeout(READ_TIMEOUT_MS); } catch (IOException ignored) {}
+            Thread pinger = new Thread(() -> {
+                while (!finished && !w.isClosed()) {
+                    try {
+                        Thread.sleep(PING_MS);
+                        if (w.isClosed()) return;
+                        w.sendText("ping");
+                        boolean askAgain;
+                        synchronized (lock) { askAgain = readySeen && !open && !legacy; }
+                        if (askAgain) w.sendText("resume " + recvSeq); // peer may not have been there yet
+                    } catch (Exception e) {
+                        w.close();
+                        return;
+                    }
+                }
+            }, "link-ping-" + who);
+            pinger.setDaemon(true);
+            pinger.start();
+            // the PC side consumed "ready" before handing the socket over: start the handshake now
+            boolean startNow;
+            synchronized (lock) { startNow = readySeen && !legacy; }
+            if (startNow) {
+                try { w.sendText("resume " + recvSeq); } catch (IOException e) { w.close(); }
+            }
+            w.readLoop(new MiniWebSocket.Listener() {
+                @Override public void onText(String t) {
+                    try {
+                        if (t.equals("ready") || t.startsWith("ready ")) {
+                            boolean send;
+                            synchronized (lock) { readySeen = true; send = !legacy; }
+                            if (send) w.sendText("resume " + recvSeq);
+                        } else if (t.startsWith("peer ")) {
+                            int v = 1;
+                            try { v = Integer.parseInt(t.substring(5).trim()); } catch (NumberFormatException ignored) {}
+                            synchronized (lock) { setPeerVersion(v); }
+                        } else if (t.startsWith("resume ")) {
+                            long peerRecv = Long.parseLong(t.substring(7).trim());
+                            if (!replay(w, peerRecv)) {
+                                log.accept("ต่อกลับไม่ได้ — ข้อมูลที่ค้างระหว่างหลุดมากเกินไป");
+                                finish(true);
+                            }
+                        }
+                    } catch (IOException e) {
+                        w.close();
+                    }
+                }
+                @Override public void onBinary(byte[] d, int len) {
+                    try {
+                        if (legacy) {
+                            tcpOut.write(d, 0, len);
+                        } else {
+                            if (len < 4) return;
+                            long seq = ((long) (d[0] & 0xff) << 24) | ((d[1] & 0xff) << 16) | ((d[2] & 0xff) << 8) | (d[3] & 0xff);
+                            synchronized (lock) {
+                                if (seq <= recvSeq) return; // replayed frame we already have
+                                recvSeq = seq;
+                            }
+                            tcpOut.write(d, 4, len - 4);
+                        }
+                        tcpOut.flush();
+                    } catch (IOException e) {
+                        finish(true); // the local USB/IP side is gone
+                    }
+                }
+                @Override public void onClose(int c, String r) {
+                    synchronized (lock) {
+                        if (ws == w) { ws = null; open = false; }
+                    }
+                    // 4001 = a newer link with our id took over, 4002 = the relay says the session is over: no resume
+                    if (c == 4001 || c == 4002) finish(false);
+                }
+            });
+        }
+
+        /** Replays every frame the peer has not received yet; returns false when they are no longer buffered. */
+        private boolean replay(MiniWebSocket w, long peerRecv) throws IOException {
+            synchronized (lock) {
+                if (peerRecv + 1 < firstSeq) return false;
+                long skip = peerRecv - firstSeq + 1;
+                java.util.Iterator<byte[]> it = sent.iterator();
+                while (skip-- > 0 && it.hasNext()) it.next();
+                while (it.hasNext()) {
+                    byte[] f = it.next();
+                    w.sendBinary(f, 0, f.length);
+                }
+                open = true;
+            }
+            return true;
+        }
+
+        private void tcpToLink() {
+            byte[] buf = new byte[60 * 1024];
+            try {
+                InputStream in = tcp.getInputStream();
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    if (legacy) {
+                        MiniWebSocket w;
+                        synchronized (lock) { w = ws; }
+                        if (w == null) break;
+                        w.sendBinary(buf, 0, n);
+                        continue;
+                    }
+                    byte[] f = new byte[4 + n];
+                    System.arraycopy(buf, 0, f, 4, n);
+                    MiniWebSocket w = null;
+                    synchronized (lock) {
+                        long seq = ++sendSeq;
+                        f[0] = (byte) (seq >>> 24); f[1] = (byte) (seq >>> 16); f[2] = (byte) (seq >>> 8); f[3] = (byte) seq;
+                        sent.addLast(f);
+                        sentBytes += f.length;
+                        while (sentBytes > BUF_MAX && sent.size() > 1) { sentBytes -= sent.pollFirst().length; firstSeq++; }
+                        if (open && ws != null) w = ws;
+                    }
+                    if (w != null) {
+                        try { w.sendBinary(f, 0, f.length); } catch (IOException e) { w.close(); } // frame stays buffered; replayed after resume
+                    }
+                }
+            } catch (IOException ignored) {
+            }
+            finish(true); // local side closed: tell the peer and stop
+        }
+
+        private void finish(boolean tellPeer) {
+            if (finished) return;
+            finished = true;
+            MiniWebSocket w;
+            synchronized (lock) { w = ws; }
+            if (w != null) {
+                if (tellPeer) try { w.sendText("bye"); } catch (IOException ignored) {}
+                w.close();
+            }
+            try { tcp.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    // =====================================================================
     // Phone side
     // =====================================================================
 
@@ -175,6 +457,7 @@ public final class Relay {
 
         /** Drops the current control link so the loop reconnects at once (call after a network change). */
         public void reconnect() {
+            Link.dropAll(); // data links resume into the same session
             MiniWebSocket w = ctl;
             if (w != null && running) {
                 Thread t = new Thread(w::close, "relay-reconnect");
@@ -269,23 +552,12 @@ public final class Relay {
                     tcp = new Socket();
                     tcp.connect(new InetSocketAddress("127.0.0.1", localPort), 5000);
                     tcp.setTcpNoDelay(true);
-                    ws = MiniWebSocket.connect(wsBase(relayUrl) + "/p/" + code + "/data?id=" + id, 15000);
+                    final String dataUrl = wsBase(relayUrl) + "/p/" + code + "/data?id=" + id + "&v=" + LINK_VERSION;
+                    ws = MiniWebSocket.connect(dataUrl, 15000);
                     log.accept("เปิดช่องข้อมูลกับคอมแล้ว");
-                    final Socket ftcp = tcp;
-                    final MiniWebSocket fws = ws;
-                    Thread up = new Thread(() -> pumpTcpToWs(ftcp, fws), "relay-up-" + id);
-                    up.setDaemon(true);
-                    up.start();
-                    final OutputStream out = tcp.getOutputStream();
-                    ws.readLoop(new MiniWebSocket.Listener() {
-                        @Override public void onText(String s) {}
-                        @Override public void onBinary(byte[] d, int len) {
-                            try { out.write(d, 0, len); out.flush(); } catch (Exception e) { fws.close(); }
-                        }
-                        @Override public void onClose(int c, String r) {
-                            try { ftcp.close(); } catch (Exception ignored) {}
-                        }
-                    });
+                    Link link = new Link(tcp, () -> MiniWebSocket.connect(dataUrl + "&resume=1", 15000), "ph-" + id, log);
+                    link.run(ws, false, 0);
+                    return;
                 } catch (Exception e) {
                     log.accept("Relay: เปิดช่องข้อมูลไม่สำเร็จ: " + e.getMessage());
                     if (ws != null) ws.close();
@@ -368,7 +640,7 @@ public final class Relay {
             String id = randomId();
             MiniWebSocket ws;
             try {
-                ws = MiniWebSocket.connect(wsBase(relayUrl) + "/c/" + code + "/data?id=" + id + credParams(lic, dev), 15000);
+                ws = MiniWebSocket.connect(dataUrl(id), 15000);
             } catch (MiniWebSocket.HttpStatusException e) {
                 if (e.status == 503) {
                     long now = System.currentTimeMillis();
@@ -387,42 +659,41 @@ public final class Relay {
                 return;
             }
             warnedOffline.set(false);
-            final CountDownLatch ready = new CountDownLatch(1);
-            final OutputStream out;
-            try {
-                out = tcp.getOutputStream();
-            } catch (Exception e) {
-                ws.close();
+            // wait for "ready" (preceded by "peer N" on a current relay) before any USB/IP byte moves
+            final int[] peerV = {0};
+            final boolean[] gotReady = {false}, closed = {false};
+            try { ws.setReadTimeout(20000); } catch (IOException ignored) {}
+            MiniWebSocket.Listener pre = new MiniWebSocket.Listener() {
+                @Override public void onText(String t) {
+                    if (t.equals("ready") || t.startsWith("ready ")) gotReady[0] = true;
+                    else if (t.startsWith("peer ")) { try { peerV[0] = Integer.parseInt(t.substring(5).trim()); } catch (NumberFormatException ignored) {} }
+                }
+                @Override public void onBinary(byte[] d, int len) {}
+                @Override public void onClose(int c, String r) { closed[0] = true; }
+            };
+            while (!gotReady[0] && !closed[0]) ws.readOne(pre);
+            if (closed[0]) {
+                log.accept("มือถือไม่ตอบผ่าน Relay (หมดเวลา)");
+                try { tcp.close(); } catch (Exception ignored) {}
                 return;
             }
-            final MiniWebSocket fws = ws;
-            Thread reader = new Thread(() -> fws.readLoop(new MiniWebSocket.Listener() {
-                @Override public void onText(String s) {
-                    if (s.equals("ready")) ready.countDown();
-                }
-                @Override public void onBinary(byte[] d, int len) {
-                    try { out.write(d, 0, len); out.flush(); } catch (Exception e) { fws.close(); }
-                }
-                @Override public void onClose(int c, String r) {
-                    ready.countDown();
-                    try { tcp.close(); } catch (Exception ignored) {}
-                }
-            }), "fwd-down");
-            reader.setDaemon(true);
-            reader.start();
+            if (peerV[0] == 0) peerV[0] = 1; // no "peer N": old relay or old phone -> plain frames, no resume
             try {
-                if (!ready.await(20, TimeUnit.SECONDS) || ws.isClosed()) {
-                    log.accept("มือถือไม่ตอบผ่าน Relay (หมดเวลา)");
-                    ws.close();
-                    try { tcp.close(); } catch (Exception ignored) {}
-                    return;
-                }
-            } catch (InterruptedException e) {
+                final String fid = id;
+                Link link = new Link(tcp, () -> MiniWebSocket.connect(dataUrl(fid) + "&resume=1", 15000), "pc-" + id, log);
+                link.run(ws, true, peerV[0]);
+            } catch (IOException e) {
                 ws.close();
-                return;
+                try { tcp.close(); } catch (Exception ignored) {}
             }
-            pumpTcpToWs(tcp, ws);
         }
+
+        private String dataUrl(String id) {
+            return wsBase(relayUrl) + "/c/" + code + "/data?id=" + id + "&v=" + LINK_VERSION + credParams(lic, dev);
+        }
+
+        /** Drops every live data link so it resumes at once (call after a network change). */
+        public static void reconnectLinks() { Link.dropAll(); }
     }
 
     /** Small helper used by tests and tools. */

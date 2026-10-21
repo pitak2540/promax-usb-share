@@ -1,0 +1,60 @@
+name: deploy-relay
+
+on:
+  push:
+    branches: [main]
+    paths: ['relay/**', '.github/workflows/relay.yml']
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Deploy to Cloudflare Workers
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning title=RELAY::ยังไม่ได้ใส่ secret CLOUDFLARE_API_TOKEN — ข้ามการ deploy relay"
+            exit 0
+          fi
+          [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && unset CLOUDFLARE_ACCOUNT_ID
+          npm ci || npm install
+          # Both relays run the same code: james-usb-relay (JAMES / PROMAX 1.0 builds) and
+          # promax-relay (newer builds). Old and new apps can talk to either.
+          rc=0
+          for NAME in james-usb-relay promax-relay; do
+            set +e
+            npx wrangler deploy --name "$NAME" > "deploy-$NAME.log" 2>&1
+            r=$?
+            set -e
+            cat "deploy-$NAME.log"
+            if [ $r -ne 0 ]; then
+              grep -iE "error|✘|authentication|token|code:" "deploy-$NAME.log" | head -8 | while read l; do echo "::error title=RELAY_DEPLOY($NAME)::$l"; done
+              rc=$r
+            fi
+          done
+          [ $rc -eq 0 ] || exit $rc
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy-james-usb-relay.log | head -1)
+          echo "::notice title=RELAY_URL::${URL}"
+          echo "RELAY_URL=$URL" >> "$GITHUB_ENV"
+          curl -fsS "$URL/" || true
+      - uses: actions/setup-java@v4
+        if: env.RELAY_URL != ''
+        with: { distribution: temurin, java-version: '17' }
+      - name: End-to-end test through the deployed relay
+        if: env.RELAY_URL != ''
+        working-directory: .
+        run: |
+          mkdir -p out
+          javac -encoding UTF-8 -d out $(find common keygen -name '*.java')
+          java -cp out com.james.usbshare.relay.RelayTest "$RELAY_URL" | tee relaytest.log
+          grep -E "PASS|FAIL|ms" relaytest.log | while read l; do echo "::notice title=RELAYTEST::$l"; done
+          grep -q "ALL PASSED" relaytest.log
