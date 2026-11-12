@@ -10,6 +10,7 @@ import javax.swing.border.LineBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.DataInputStream;
@@ -45,6 +46,7 @@ public class App {
         long lastSeen;
         boolean manual;
         boolean viaTailscale;
+        boolean viaRadmin;
         boolean viaRelay;
         boolean relayOnline = true;
         String relayCode;
@@ -52,8 +54,8 @@ public class App {
         @Override public String toString() {
             if (viaRelay)
                 return (name.isEmpty() ? "มือถือ" : name) + "  [รหัส " + relayCode + "]" + (relayOnline ? "" : "  (ออฟไลน์)");
-            boolean alive = manual || viaTailscale || System.currentTimeMillis() - lastSeen < 15000;
-            String tag = viaTailscale ? "  [Tailscale]" : "";
+            boolean alive = manual || viaTailscale || viaRadmin || System.currentTimeMillis() - lastSeen < 15000;
+            String tag = viaTailscale ? "  [Tailscale]" : viaRadmin ? "  [Radmin VPN]" : "";
             return (name.isEmpty() ? host : name + "  (" + host + ")") + tag + (alive ? "" : "  (ไม่เห็นสัญญาณ)");
         }
     }
@@ -339,10 +341,13 @@ public class App {
         rl.addActionListener(e -> askRelayCode());
         JButton ts = button("ค้นหาผ่าน Tailscale (ถ้าลงไว้)", new Color(0x24324A));
         ts.addActionListener(e -> scanTailscale(true));
-        JPanel crossBtns = new JPanel(new GridLayout(2, 1, 0, 6));
+        JButton rv = button("เชื่อมผ่าน Radmin VPN (ถ้าลงไว้)", new Color(0x24324A));
+        rv.addActionListener(e -> radminInfo());
+        JPanel crossBtns = new JPanel(new GridLayout(3, 1, 0, 6));
         crossBtns.setOpaque(false);
         crossBtns.add(rl);
         crossBtns.add(ts);
+        crossBtns.add(rv);
         manual.add(crossBtns, BorderLayout.SOUTH);
         JPopupMenu pm = new JPopupMenu();
         JMenuItem rm = new JMenuItem("ลบออกจากรายการ");
@@ -499,6 +504,7 @@ public class App {
             phoneModel.addElement(ph);
             log("พบมือถือ " + b.name + " ที่ " + host);
         }
+        if (RadminVpn.isRadminIp(host)) ph.viaRadmin = true; // found over the Radmin VPN virtual LAN
         String oldKey = ph.beacon == null ? "" : beaconKey(ph.beacon);
         ph.name = b.name;
         ph.port = b.port;
@@ -691,9 +697,35 @@ public class App {
         }
         ph.manual = true;
         ph.viaTailscale = Tailscale.isTailscaleIp(host);
+        ph.viaRadmin = RadminVpn.isRadminIp(host);
         ph.port = port;
         phoneList.setSelectedValue(ph, true);
         refreshDevices();
+    }
+
+    /**
+     * Shows this PC's Radmin VPN address (so it can be typed on the other machine) and copies it to
+     * the clipboard. Peers that are sharing broadcast over the Radmin virtual LAN and appear in the
+     * list on their own; typing the address is the fallback when the firewall blocks that broadcast.
+     */
+    void radminInfo() {
+        work.execute(() -> {
+            String ip = RadminVpn.localIp();
+            SwingUtilities.invokeLater(() -> {
+                if (ip == null) {
+                    log("ยังไม่ได้ติดตั้ง/ยังไม่เชื่อม Radmin VPN บนคอมนี้ — ติดตั้งจาก " + RadminVpn.DOWNLOAD_URL
+                            + " เปิดโปรแกรม แล้วให้คอมทั้งสองเครื่องเข้าเน็ตเวิร์ก (Network) เดียวกัน");
+                    openUrl(RadminVpn.DOWNLOAD_URL);
+                    return;
+                }
+                try {
+                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(ip), null);
+                } catch (Exception ignored) {}
+                log("Radmin VPN พร้อม — IP เครื่องนี้: " + ip + " (คัดลอกแล้ว)");
+                log("• เครื่องที่เสียบอุปกรณ์: แท็บ 'แชร์ USB ของคอมนี้' เลือกอุปกรณ์แล้วกด 'แชร์' — เครื่องนี้จะเจอเองในรายการ");
+                log("• ถ้าไม่ขึ้นเอง (ไฟร์วอลล์บล็อก): พิมพ์ IP Radmin ของ 'เครื่องที่แชร์' ในช่อง 'เพิ่ม IP' ด้านซ้าย");
+            });
+        });
     }
 
     // ---------- devices ----------
@@ -786,6 +818,8 @@ public class App {
             log("เชื่อมต่อด้วยรหัสจับคู่ (" + ph.relayCode + ") — ต้องเปิดโปรแกรมนี้ค้างไว้ตลอดการใช้งาน ถ้าปิด อุปกรณ์จะหลุด");
         if (ph.viaTailscale)
             log("เชื่อมต่อข้ามเครือข่ายผ่าน Tailscale — จะหน่วงกว่า Wi-Fi วงเดียวกัน ถ้าโปรแกรมสแกนขึ้น timeout ให้ลองใหม่ หรือย้ายมาใช้ Wi-Fi วงเดียวกัน");
+        if (ph.viaRadmin)
+            log("เชื่อมต่อข้ามเครือข่ายผ่าน Radmin VPN — จะหน่วงกว่า Wi-Fi วงเดียวกัน ถ้าโปรแกรมสแกนขึ้น timeout ให้ลองใหม่ ห้ามใช้ตอนเขียน/แฟลชกล่อง ECU");
         if (isOpenPort(d)) {
             int a = JOptionPane.showConfirmDialog(frame,
                     Proto.knownName(d.idVendor, d.idProduct) + " ผ่านเครือข่าย\n\n"
