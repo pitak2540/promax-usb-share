@@ -289,7 +289,8 @@ public class UsbShareService extends Service {
                         bd.pid = d.idProduct;
                         bd.inUse = busy.contains(d.busid);
                         bd.manufacturer = d.manufacturer;
-                        bd.product = d.product;
+                        String a = AndroidUsbBackend.alias(this, d.idVendor, d.idProduct);
+                        bd.product = (a != null && !a.isEmpty()) ? a : d.product;
                         b.devices.add(bd);
                     }
                     byte[] data = b.encode();

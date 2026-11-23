@@ -115,6 +115,20 @@ public class AndroidUsbBackend implements Backend {
         return n;
     }
 
+    /** Key for a per-device custom name, by VID:PID so it survives replugging and a restart. */
+    public static String aliasKey(int vid, int pid) { return String.format("alias.%04x:%04x", vid & 0xffff, pid & 0xffff); }
+
+    /** The custom name set for this VID:PID, or "" if none. */
+    public static String alias(Context c, int vid, int pid) {
+        return c.getSharedPreferences(UsbShareService.PREFS, Context.MODE_PRIVATE).getString(aliasKey(vid, pid), "");
+    }
+
+    /** Name to show for a device: the custom name if set, otherwise the real USB name. */
+    public static String displayName(Context c, UsbDevice d) {
+        String a = alias(c, d.getVendorId(), d.getProductId());
+        return (a != null && !a.isEmpty()) ? a : nameOf(d);
+    }
+
     public static String knownName(int vid, int pid) {
         if (vid == 0x0403 && pid == 0xcc4c) return "Tactrix OpenPort 2.0";
         if (vid == 0x0403 && pid == 0xcc4d) return "Tactrix OpenPort 2.0";

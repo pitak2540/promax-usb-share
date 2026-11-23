@@ -92,11 +92,14 @@ public class SharePanel extends JPanel {
         share.addActionListener(e -> bindSelected(true));
         JButton unshare = app.button("เลิกแชร์", App.RED);
         unshare.addActionListener(e -> bindSelected(false));
+        JButton rename = app.button("เปลี่ยนชื่อ", App.LINE);
+        rename.addActionListener(e -> renameSelected());
         JButton refresh = app.button("รีเฟรช", App.LINE);
         refresh.addActionListener(e -> refresh());
         status.setFont(App.FONT);
         btns.add(share);
         btns.add(unshare);
+        btns.add(rename);
         btns.add(refresh);
         btns.add(status);
         list.add(btns, BorderLayout.SOUTH);
@@ -184,12 +187,7 @@ public class SharePanel extends JPanel {
         model.setRowCount(0);
         int shared = 0;
         for (LocalDev d : list) {
-            String[] vp = d.vidpid.split(":");
-            String nice = d.name;
-            try {
-                String k = Proto.knownName(Integer.parseInt(vp[0], 16), Integer.parseInt(vp[1], 16));
-                if (!k.startsWith("USB ")) nice = k + " — " + d.name;
-            } catch (Exception ignored) {}
+            String nice = displayName(d);
             String st = d.state.startsWith("Not") ? "ไม่ได้แชร์" : d.state.startsWith("Attached") ? "ใช้งานอยู่ (มีคอมเชื่อมแล้ว)" : "ว่าง — แชร์อยู่";
             if (d.shared()) shared++;
             model.addRow(new Object[]{nice, d.vidpid.toUpperCase(), d.busid, st});
@@ -207,6 +205,49 @@ public class SharePanel extends JPanel {
         if (!hosting) beaconOn = false;
         if (hosting && relay == null) applyRelay();
         if (!hosting && relay != null) { relay.stop(); relay = null; }
+    }
+
+    // ---------- custom device name (alias) ----------
+
+    /** Alias is stored per VID:PID so it survives replugging into another port and a reboot. */
+    private static String aliasKey(String vidpid) { return "alias." + vidpid.toLowerCase(); }
+
+    private String alias(String vidpid) { return app.prefs.get(aliasKey(vidpid), ""); }
+
+    /** Name shown in this list and advertised to the other PC: the custom name if set, else the Windows name. */
+    String displayName(LocalDev d) {
+        String a = alias(d.vidpid);
+        if (a != null && !a.isEmpty()) return a;
+        try {
+            String[] vp = d.vidpid.split(":");
+            String k = Proto.knownName(Integer.parseInt(vp[0], 16), Integer.parseInt(vp[1], 16));
+            if (!k.startsWith("USB ")) return k + " — " + d.name;
+        } catch (Exception ignored) {}
+        return d.name;
+    }
+
+    private void renameSelected() {
+        int row = table.getSelectedRow();
+        if (row < 0 || row >= devs.size()) {
+            JOptionPane.showMessageDialog(app.frame, "เลือกอุปกรณ์ก่อน");
+            return;
+        }
+        LocalDev d = devs.get(row);
+        String cur = alias(d.vidpid);
+        String seed = (cur == null || cur.isEmpty()) ? d.name : cur;
+        Object v = JOptionPane.showInputDialog(app.frame,
+                "ตั้งชื่อที่จะให้คอมเครื่องอื่นเห็นสำหรับอุปกรณ์นี้\n(" + d.vidpid.toUpperCase() + ")\nเว้นว่างไว้เพื่อใช้ชื่อเดิมจาก Windows",
+                "เปลี่ยนชื่อ USB", JOptionPane.PLAIN_MESSAGE, null, null, seed);
+        if (v == null) return; // ยกเลิก
+        String name = v.toString().trim();
+        if (name.isEmpty()) {
+            app.prefs.remove(aliasKey(d.vidpid));
+            app.log("คืนชื่อเดิมให้ " + d.vidpid.toUpperCase());
+        } else {
+            app.prefs.put(aliasKey(d.vidpid), name);
+            app.log("ตั้งชื่อ " + d.vidpid.toUpperCase() + " เป็น: " + name);
+        }
+        refresh();
     }
 
     private void bindSelected(boolean share) {
@@ -293,7 +334,7 @@ public class SharePanel extends JPanel {
                         bd.vid = Integer.parseInt(vp[0], 16);
                         bd.pid = Integer.parseInt(vp[1], 16);
                         bd.inUse = d.state.startsWith("Attached");
-                        bd.product = d.name;
+                        bd.product = displayName(d);
                         b.devices.add(bd);
                     }
                     byte[] data = b.encode();

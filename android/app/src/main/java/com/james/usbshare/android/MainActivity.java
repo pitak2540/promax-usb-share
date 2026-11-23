@@ -298,6 +298,35 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(tick);
     }
 
+    /** Lets the user set a custom name that the PC will see for this USB device (stored by VID:PID). */
+    private void renameDevice(UsbDevice d) {
+        int vid = d.getVendorId(), pid = d.getProductId();
+        String cur = AndroidUsbBackend.alias(this, vid, pid);
+        EditText et = new EditText(this);
+        et.setText(cur.isEmpty() ? AndroidUsbBackend.nameOf(d) : cur);
+        et.setSingleLine(true);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("ตั้งชื่อ USB")
+                .setMessage(String.format("ชื่อที่คอมเครื่องอื่นจะเห็น (%04X:%04X)", vid, pid))
+                .setView(et)
+                .setPositiveButton("บันทึก", (dl, w) -> {
+                    String name = et.getText().toString().trim();
+                    getSharedPreferences(UsbShareService.PREFS, MODE_PRIVATE).edit()
+                            .putString(AndroidUsbBackend.aliasKey(vid, pid), name).apply();
+                    LogBus.add(name.isEmpty() ? "คืนชื่อเดิมให้อุปกรณ์" : "ตั้งชื่ออุปกรณ์เป็น: " + name);
+                    lastDeviceKey = "";
+                    refresh();
+                })
+                .setNeutralButton("ใช้ชื่อเดิม", (dl, w) -> {
+                    getSharedPreferences(UsbShareService.PREFS, MODE_PRIVATE).edit()
+                            .remove(AndroidUsbBackend.aliasKey(vid, pid)).apply();
+                    lastDeviceKey = "";
+                    refresh();
+                })
+                .setNegativeButton("ยกเลิก", null)
+                .show();
+    }
+
     private void editRelayUrl() {
         EditText et = new EditText(this);
         et.setText(UsbShareService.relayUrl(this));
@@ -421,7 +450,8 @@ public class MainActivity extends Activity {
         StringBuilder key = new StringBuilder();
         boolean openport = false;
         for (UsbDevice d : devs) {
-            key.append(d.getDeviceName()).append(um.hasPermission(d)).append(busy.contains(AndroidUsbBackend.busidOf(d))).append(';');
+            key.append(d.getDeviceName()).append(um.hasPermission(d)).append(busy.contains(AndroidUsbBackend.busidOf(d)))
+               .append(AndroidUsbBackend.alias(this, d.getVendorId(), d.getProductId())).append(';');
             if (Proto.isEcuFlashInterface(d.getVendorId(), d.getProductId())) openport = true;
         }
         warnView.setVisibility(openport ? View.VISIBLE : View.GONE);
@@ -484,11 +514,15 @@ public class MainActivity extends Activity {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
-        col.addView(text(AndroidUsbBackend.nameOf(d), 15, Color.WHITE, true));
+        col.addView(text(AndroidUsbBackend.displayName(this, d), 15, Color.WHITE, true));
         String state = inUse ? "PC กำลังใช้งาน" : (um.hasPermission(d) ? "พร้อมแชร์" : "ยังไม่อนุญาต (จะถามตอน PC เชื่อมต่อ)");
         col.addView(text(String.format("ID %04X:%04X  •  busid %s\n%s", d.getVendorId(), d.getProductId(),
                 AndroidUsbBackend.busidOf(d), state), 12, inUse ? BLUE : SILVER, false));
         row.addView(col);
+        Button nameBtn = button("ตั้งชื่อ", DIM);
+        nameBtn.setTextSize(13);
+        nameBtn.setOnClickListener(v -> renameDevice(d));
+        row.addView(nameBtn);
         if (!um.hasPermission(d)) {
             Button b = button("อนุญาต", BLUE);
             b.setTextSize(13);
