@@ -308,7 +308,8 @@ public class SharePanel extends JPanel {
         for (LocalDev d : devs) if (d.shared()) anyShared = true;
         if (!anyShared) return;
         relay = new Relay.Phone(app.relayUrl(), code(), pcName(), Proto.PORT, app::log)
-                .credentials(app.prefs.get("lic.key", null), app.license.device());
+                .credentials(app.prefs.get("lic.key", null), app.license.device())
+                .names((vid, pid) -> app.prefs.get(aliasKey(String.format("%04x:%04x", vid, pid)), null));
         relay.start();
     }
 

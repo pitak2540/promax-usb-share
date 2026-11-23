@@ -2,6 +2,7 @@ package com.james.usbshare.usbip;
 
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -84,10 +85,18 @@ public final class Proto {
     // ---------- encoding helpers ----------
 
     static void putFixedString(ByteBuffer b, String s, int len) {
-        byte[] raw = s.getBytes(StandardCharsets.US_ASCII);
+        byte[] raw = utf8Fixed(s, len);
+        b.put(raw, 0, len);
+    }
+
+    /** UTF-8 bytes for {@code s}, NUL-terminated and padded to {@code len}; truncated on a char boundary. */
+    static byte[] utf8Fixed(String s, int len) {
+        byte[] raw = s.getBytes(StandardCharsets.UTF_8);
         int n = Math.min(raw.length, len - 1);
-        b.put(raw, 0, n);
-        for (int i = n; i < len; i++) b.put((byte) 0);
+        if (n < raw.length) while (n > 0 && (raw[n] & 0xC0) == 0x80) n--; // don't cut a multi-byte char in half
+        byte[] out = new byte[len];
+        System.arraycopy(raw, 0, out, 0, n);
+        return out;
     }
 
     static String getFixedString(ByteBuffer b, int len) {
@@ -95,7 +104,75 @@ public final class Proto {
         b.get(raw);
         int n = 0;
         while (n < len && raw[n] != 0) n++;
-        return new String(raw, 0, n, StandardCharsets.US_ASCII);
+        return new String(raw, 0, n, StandardCharsets.UTF_8);
+    }
+
+    // ---------- custom device names over the wire ----------
+
+    /** Supplies a per-device custom name (or null) so the device list can carry it to the other machine. */
+    public interface NameProvider { String nameFor(int vid, int pid); }
+
+    /**
+     * Wraps the byte stream coming back from a local USB/IP server (our phone server, or usbipd-win).
+     * When that stream begins with an OP_REP_DEVLIST reply, each device whose VID:PID has a custom name
+     * gets that name written into its {@code path} field (which already travels the wire and is shown by
+     * the client). Everything else — import replies, the whole URB stream — passes through untouched, so
+     * attaching is never affected. Used on the relay host side, where there is no LAN beacon to carry names.
+     */
+    public static InputStream devListNames(InputStream raw, NameProvider names) {
+        if (names == null) return raw;
+        return new java.io.InputStream() {
+            private InputStream head; // the (possibly rewritten) reply, then the untouched remainder
+            private boolean started;
+
+            private void start() throws IOException {
+                started = true;
+                DataInputStream din = new DataInputStream(raw);
+                byte[] hdr = new byte[8];
+                try { din.readFully(hdr); } catch (java.io.EOFException eof) { head = new java.io.ByteArrayInputStream(new byte[0]); return; }
+                int op = ((hdr[2] & 0xff) << 8) | (hdr[3] & 0xff); // version[0..1], op[2..3], status[4..7]
+                int status = ((hdr[4] & 0xff) << 24) | ((hdr[5] & 0xff) << 16) | ((hdr[6] & 0xff) << 8) | (hdr[7] & 0xff);
+                if (op != OP_REP_DEVLIST || status != 0) { // not a device list we rewrite: stream it all through
+                    head = new java.io.SequenceInputStream(new java.io.ByteArrayInputStream(hdr), raw);
+                    return;
+                }
+                byte[] cnt = new byte[4];
+                din.readFully(cnt);
+                int count = ((cnt[0] & 0xff) << 24) | ((cnt[1] & 0xff) << 16) | ((cnt[2] & 0xff) << 8) | (cnt[3] & 0xff);
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                out.write(hdr);
+                out.write(cnt);
+                for (int i = 0; i < count && count >= 0 && count < 1024; i++) {
+                    byte[] dev = new byte[DEVICE_LEN];
+                    din.readFully(dev);
+                    int nIf = dev[DEVICE_LEN - 1] & 0xff;
+                    int vid = ((dev[300] & 0xff) << 8) | (dev[301] & 0xff);
+                    int pid = ((dev[302] & 0xff) << 8) | (dev[303] & 0xff);
+                    String name = names.nameFor(vid, pid);
+                    if (name != null && !name.isEmpty()) {
+                        byte[] p = utf8Fixed(name, 256); // overwrite the 256-byte path field in place
+                        System.arraycopy(p, 0, dev, 0, 256);
+                    }
+                    out.write(dev);
+                    byte[] ifs = new byte[4 * nIf];
+                    din.readFully(ifs);
+                    out.write(ifs);
+                }
+                head = new java.io.SequenceInputStream(new java.io.ByteArrayInputStream(out.toByteArray()), raw);
+            }
+
+            @Override public int read() throws IOException {
+                if (!started) start();
+                return head.read();
+            }
+
+            @Override public int read(byte[] b, int off, int len) throws IOException {
+                if (!started) start();
+                return head.read(b, off, len);
+            }
+
+            @Override public void close() throws IOException { raw.close(); }
+        };
     }
 
     public static void putDevice(ByteBuffer b, DeviceInfo d) {

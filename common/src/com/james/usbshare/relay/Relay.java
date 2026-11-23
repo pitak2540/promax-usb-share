@@ -252,12 +252,20 @@ public final class Relay {
         /** Called while the link is in use so callers (tests, network-change hooks) can drop it. */
         private static final java.util.Set<Link> LIVE = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
+        private final com.james.usbshare.usbip.Proto.NameProvider names;
+
         Link(Socket tcp, Connector reconnector, String who, Consumer<String> log) throws IOException {
+            this(tcp, reconnector, who, log, null);
+        }
+
+        Link(Socket tcp, Connector reconnector, String who, Consumer<String> log,
+             com.james.usbshare.usbip.Proto.NameProvider names) throws IOException {
             this.tcp = tcp;
             this.tcpOut = tcp.getOutputStream();
             this.reconnector = reconnector;
             this.who = who;
             this.log = log;
+            this.names = names;
             this.dir = who.startsWith("pc-") ? 1 : 2;
             E2E e = null;
             try { e = new E2E(); } catch (java.security.GeneralSecurityException ex) { log.accept("เข้ารหัสไม่ได้: " + ex.getMessage()); }
@@ -486,7 +494,7 @@ public final class Relay {
         private void tcpToLink() {
             byte[] buf = new byte[60 * 1024];
             try {
-                InputStream in = tcp.getInputStream();
+                InputStream in = com.james.usbshare.usbip.Proto.devListNames(tcp.getInputStream(), names);
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     if (legacy) {
@@ -538,11 +546,18 @@ public final class Relay {
         private volatile String lic;
         private volatile byte[] dev;
         private volatile String lastError = "";
+        private volatile com.james.usbshare.usbip.Proto.NameProvider names;
 
         /** License key (or null during the trial) and this device's 8-byte id. */
         public Phone credentials(String licenseKey, byte[] deviceHash) {
             this.lic = licenseKey;
             this.dev = deviceHash;
+            return this;
+        }
+
+        /** Custom device names to advertise to the connecting PC over the relay (no LAN beacon there). */
+        public Phone names(com.james.usbshare.usbip.Proto.NameProvider names) {
+            this.names = names;
             return this;
         }
 
@@ -673,7 +688,7 @@ public final class Relay {
                     final String dataUrl = wsBase(relayUrl) + "/p/" + code + "/data?id=" + id + "&v=" + LINK_VERSION;
                     ws = MiniWebSocket.connect(dataUrl, 15000);
                     log.accept("เปิดช่องข้อมูลกับคอมแล้ว");
-                    Link link = new Link(tcp, () -> MiniWebSocket.connect(dataUrl + "&resume=1", 15000), "ph-" + id, log);
+                    Link link = new Link(tcp, () -> MiniWebSocket.connect(dataUrl + "&resume=1", 15000), "ph-" + id, log, names);
                     link.run(ws, false, 0);
                     return;
                 } catch (Exception e) {

@@ -92,7 +92,11 @@ public class UsbShareService extends Service {
         if (relay != null) { relay.stop(); relay = null; }
         if (relayEnabled(this) && server != null && server.isRunning()) {
             relay = new Relay.Phone(relayUrl(this), relayCode(this), Build.MANUFACTURER + " " + Build.MODEL, Proto.PORT, LogBus::add)
-                    .credentials(LicenseManager.savedKey(this), LicenseManager.deviceHash(this));
+                    .credentials(LicenseManager.savedKey(this), LicenseManager.deviceHash(this))
+                    .names((vid, pid) -> {
+                        String a = AndroidUsbBackend.alias(this, vid, pid);
+                        return (a != null && !a.isEmpty()) ? a : null;
+                    });
             relay.start();
         }
     }

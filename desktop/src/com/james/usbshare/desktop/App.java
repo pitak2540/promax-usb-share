@@ -767,6 +767,10 @@ public class App {
         for (Proto.DeviceInfo d : list) {
             String name = d.product;
             if (beacon != null) for (Beacon.Dev bd : beacon.devices) if (bd.busid.equals(d.busid) && !bd.product.isEmpty()) name = bd.product;
+            // over the relay there is no beacon: the host puts a custom name in the path field (a real USB/IP
+            // path always contains '/' or '\', so a slash-free path is a name the sharer set)
+            if ((name == null || name.isEmpty()) && d.path != null && !d.path.isEmpty()
+                    && d.path.indexOf('/') < 0 && d.path.indexOf('\\') < 0) name = d.path;
             if (name == null || name.isEmpty()) name = Proto.knownName(d.idVendor, d.idProduct);
             devModel.addRow(new Object[]{name, String.format("%04X:%04X", d.idVendor, d.idProduct), d.busid,
                     Proto.speedName(d.speed), "ว่าง — พร้อมเชื่อมต่อ"});
