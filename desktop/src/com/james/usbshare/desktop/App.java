@@ -76,6 +76,7 @@ public class App {
 
     static final long OFFLINE_MS = 20000; // a non-saved machine is removed this long after it stops answering
     volatile java.util.Set<String> attachedHosts = new java.util.HashSet<>();
+    private volatile boolean selectedListFailed; // last device-list fetch for the selected machine could not reach it
     // the name the sharer advertises for each device, so the attached-ports table can show it too.
     // keys: "host|busid" (exact) and "busid" (fallback, e.g. when attached via the relay as 127.0.0.1)
     final java.util.Map<String, String> sharedNames = new java.util.concurrent.ConcurrentHashMap<>();
@@ -929,6 +930,7 @@ public class App {
     void fillDevices(Phone target, List<Proto.DeviceInfo> list, Beacon beacon, String err) {
         Phone sel = phoneList.getSelectedValue();
         if (sel != target) return;
+        selectedListFailed = err != null; // remember why devices are unavailable, for an accurate message later
         if (err == null) target.lastSeen = System.currentTimeMillis(); // it answered → keep it alive in the list
         String host = target.viaRelay ? "รหัส " + target.relayCode : target.host;
         devModel.setRowCount(0);
@@ -953,8 +955,10 @@ public class App {
         if (beacon != null) {
             for (Beacon.Dev bd : beacon.devices) {
                 if (listed.contains(bd.busid)) continue;
-                devModel.addRow(new Object[]{bd.product, String.format("%04X:%04X", bd.vid, bd.pid), bd.busid, "",
-                        bd.inUse ? "ใช้งานอยู่ (มีคอมเชื่อมแล้ว)" : "ไม่พร้อม"});
+                String st = bd.inUse ? "ใช้งานอยู่ (มีคอมเชื่อมแล้ว)"
+                        : err != null ? "เชื่อมเครื่องแชร์ไม่ได้ (พอร์ตไม่ตอบ) — ตรวจที่เครื่องแชร์"
+                        : "ไม่พร้อม (เครื่องแชร์ยังไม่เปิดให้ใช้ตัวนี้)";
+                devModel.addRow(new Object[]{bd.product, String.format("%04X:%04X", bd.vid, bd.pid), bd.busid, "", st});
                 Proto.DeviceInfo d = new Proto.DeviceInfo();
                 d.busid = bd.busid; d.idVendor = bd.vid; d.idProduct = bd.pid; d.product = bd.product;
                 d.path = null; // marker: not attachable now
@@ -993,9 +997,16 @@ public class App {
         int busy = 0;
         for (Proto.DeviceInfo d : devices) { if (d.path == null) busy++; else todo.add(d); }
         if (todo.isEmpty()) {
-            JOptionPane.showMessageDialog(frame, busy > 0
+            String why = selectedListFailed
+                    ? "ยังเชื่อมต่อกับเครื่องที่แชร์ไม่ได้ (พอร์ตแชร์ไม่ตอบ / Connection refused)\n\n"
+                      + "ไม่ใช่เพราะมีคอมเครื่องอื่นเชื่อมอยู่ — แต่เพราะติดต่อพอร์ตแชร์ของเครื่องนั้นไม่ได้\n"
+                      + "ไปที่ 'เครื่องที่แชร์' แล้วตรวจ:\n"
+                      + "• เปิดโปรแกรมไว้ที่แท็บ 'แชร์ USB ของคอมนี้' และกดติดตั้งไดรเวอร์ฝั่ง Server แล้ว\n"
+                      + "• อยู่วงเน็ตเดียวกัน / IP ถูกต้อง และไฟร์วอลล์ Windows เปิดพอร์ต 3240"
+                    : busy > 0
                     ? "อุปกรณ์ที่เลือกมีคอมเครื่องอื่นเชื่อมอยู่ ต้องตัดที่เครื่องนั้นก่อน"
-                    : "ไม่มีอุปกรณ์ให้เชื่อมต่อ");
+                    : "ไม่มีอุปกรณ์ให้เชื่อมต่อ";
+            JOptionPane.showMessageDialog(frame, why);
             return;
         }
         if (!cli.available()) {
