@@ -423,14 +423,18 @@ public class App {
         devCard.add(scroll(devTable), BorderLayout.CENTER);
         JPanel devButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         devButtons.setOpaque(false);
+        devTable.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION); // เลือกหลายตัวแล้วต่อพร้อมกันได้
         JButton attach = button("เชื่อมต่อเข้าคอม", BLUE);
         attach.addActionListener(e -> attachSelected());
+        JButton attachAll = button("เชื่อมต่อทั้งหมด", new Color(0x1C7C4A));
+        attachAll.addActionListener(e -> attachAll());
         JButton refresh = button("รีเฟรช", LINE);
         refresh.addActionListener(e -> refreshDevices());
         lowLatency.setFont(FONT);
         lowLatency.setForeground(SILVER);
         lowLatency.setOpaque(false);
         devButtons.add(attach);
+        devButtons.add(attachAll);
         devButtons.add(refresh);
         devButtons.add(lowLatency);
         devCard.add(devButtons, BorderLayout.SOUTH);
@@ -938,17 +942,34 @@ public class App {
         return Proto.isEcuFlashInterface(d.idVendor, d.idProduct);
     }
 
+    /** Attaches every device currently selected in the table (one, several, or — via attachAll — all of them). */
     void attachSelected() {
-        if (!license.require()) return;
         Phone ph = phoneList.getSelectedValue();
-        int row = devTable.getSelectedRow();
-        if (ph == null || row < 0 || row >= shownDevices.size()) {
-            JOptionPane.showMessageDialog(frame, "เลือกมือถือและอุปกรณ์ก่อน");
-            return;
-        }
-        Proto.DeviceInfo d = shownDevices.get(row);
-        if (d.path == null) {
-            JOptionPane.showMessageDialog(frame, "อุปกรณ์นี้มีคอมเครื่องอื่นเชื่อมอยู่ ต้องตัดการเชื่อมต่อที่เครื่องนั้นก่อน");
+        if (ph == null) { JOptionPane.showMessageDialog(frame, "เลือกมือถือก่อน"); return; }
+        java.util.List<Proto.DeviceInfo> picked = new ArrayList<>();
+        for (int row : devTable.getSelectedRows())
+            if (row >= 0 && row < shownDevices.size()) picked.add(shownDevices.get(row));
+        if (picked.isEmpty()) { JOptionPane.showMessageDialog(frame, "เลือกอุปกรณ์ก่อน (เลือกได้หลายตัวพร้อมกัน)"); return; }
+        attachAll(ph, picked);
+    }
+
+    /** Attaches every attachable device shown for the selected phone, all at once. */
+    void attachAll() {
+        Phone ph = phoneList.getSelectedValue();
+        if (ph == null) { JOptionPane.showMessageDialog(frame, "เลือกมือถือก่อน"); return; }
+        attachAll(ph, new ArrayList<>(shownDevices));
+    }
+
+    private void attachAll(Phone ph, java.util.List<Proto.DeviceInfo> devices) {
+        if (!license.require()) return;
+        // keep only the devices that can actually be attached right now
+        java.util.List<Proto.DeviceInfo> todo = new ArrayList<>();
+        int busy = 0;
+        for (Proto.DeviceInfo d : devices) { if (d.path == null) busy++; else todo.add(d); }
+        if (todo.isEmpty()) {
+            JOptionPane.showMessageDialog(frame, busy > 0
+                    ? "อุปกรณ์ที่เลือกมีคอมเครื่องอื่นเชื่อมอยู่ ต้องตัดที่เครื่องนั้นก่อน"
+                    : "ไม่มีอุปกรณ์ให้เชื่อมต่อ");
             return;
         }
         if (!cli.available()) {
@@ -967,9 +988,12 @@ public class App {
             log("เชื่อมต่อข้ามเครือข่ายผ่าน Tailscale — จะหน่วงกว่า Wi-Fi วงเดียวกัน ถ้าโปรแกรมสแกนขึ้น timeout ให้ลองใหม่ หรือย้ายมาใช้ Wi-Fi วงเดียวกัน");
         if (ph.viaRadmin)
             log("เชื่อมต่อข้ามเครือข่ายผ่าน Radmin VPN — จะหน่วงกว่า Wi-Fi วงเดียวกัน ถ้าโปรแกรมสแกนขึ้น timeout ให้ลองใหม่ ห้ามใช้ตอนเขียน/แฟลชกล่อง ECU");
-        if (isOpenPort(d)) {
+        // show the OpenPort flashing warning once for the whole batch
+        boolean anyOpenPort = false;
+        for (Proto.DeviceInfo d : todo) if (isOpenPort(d)) { anyOpenPort = true; break; }
+        if (anyOpenPort) {
             int a = JOptionPane.showConfirmDialog(frame,
-                    Proto.knownName(d.idVendor, d.idProduct) + " ผ่านเครือข่าย\n\n"
+                    "มีสายวินิจฉัย (OpenPort) ในรายการที่จะเชื่อมผ่านเครือข่าย\n\n"
                             + "ใช้ได้: อ่าน/ลบโค้ด, ดูค่าสด, ล็อกข้อมูล\n"
                             + "ห้าม: แฟลช/เขียน ECU (ROM write/reflash)\n\n"
                             + "ถ้า Wi-Fi สะดุดกลางการแฟลช กล่อง ECU อาจเสียจนสตาร์ทไม่ติด\n"
@@ -980,11 +1004,17 @@ public class App {
         final String host = ph.host;
         final int port = ph.port;
         final boolean ll = lowLatency.isSelected();
-        log("กำลังเชื่อมต่อ " + d.busid + " จาก " + host + " ... (ถ้ามือถือถามสิทธิ์ USB ให้กดตกลง)");
+        log("กำลังเชื่อมต่อ " + todo.size() + " อุปกรณ์จาก " + (ph.viaRelay ? "รหัส " + ph.relayCode : host)
+                + " ... (ถ้ามือถือถามสิทธิ์ USB ให้กดตกลงทุกตัว)");
         work.execute(() -> {
-            UsbipCli.Result r = cli.attach(host, port, d.busid, ll);
-            log((r.ok() ? "เชื่อมต่อสำเร็จ: " : "เชื่อมต่อไม่สำเร็จ: ") + r.output.replace('\n', ' '));
-            refreshPorts();
+            int ok = 0;
+            for (Proto.DeviceInfo d : todo) {
+                UsbipCli.Result r = cli.attach(host, port, d.busid, ll);
+                if (r.ok()) ok++;
+                log((r.ok() ? "เชื่อมต่อสำเร็จ: " : "เชื่อมต่อไม่สำเร็จ: ") + d.busid + " — " + r.output.replace('\n', ' '));
+                refreshPorts();
+            }
+            log("เชื่อมต่อเสร็จ " + ok + "/" + todo.size() + " อุปกรณ์");
             SwingUtilities.invokeLater(this::refreshDevices);
         });
     }
