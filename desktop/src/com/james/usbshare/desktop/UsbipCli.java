@@ -26,7 +26,24 @@ public final class UsbipCli {
     public static final class Port {
         public int port;
         public String description = "";
-        public String remote = "";
+        public String remote = ""; // e.g. usbip://192.168.2.33:3240/1-4
+
+        /** The sharer's address from {@link #remote}, e.g. "192.168.2.33" (empty if unknown). */
+        public String host() {
+            String s = remote.replaceFirst("(?i)^usbip://", "");
+            int slash = s.indexOf('/');
+            if (slash >= 0) s = s.substring(0, slash);
+            int colon = s.indexOf(':');
+            if (colon >= 0) s = s.substring(0, colon);
+            return s;
+        }
+
+        /** The device's bus id from {@link #remote}, e.g. "1-4" (empty if unknown). */
+        public String busid() {
+            int slash = remote.lastIndexOf('/');
+            return slash >= 0 ? remote.substring(slash + 1) : "";
+        }
+
         @Override public String toString() { return "Port " + port + " " + description + " " + remote; }
     }
 

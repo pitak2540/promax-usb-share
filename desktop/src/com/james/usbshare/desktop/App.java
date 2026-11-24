@@ -76,6 +76,15 @@ public class App {
 
     static final long OFFLINE_MS = 20000; // a non-saved machine is removed this long after it stops answering
     volatile java.util.Set<String> attachedHosts = new java.util.HashSet<>();
+    // the name the sharer advertises for each device, so the attached-ports table can show it too.
+    // keys: "host|busid" (exact) and "busid" (fallback, e.g. when attached via the relay as 127.0.0.1)
+    final java.util.Map<String, String> sharedNames = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void rememberSharedName(String host, String busid, String name) {
+        if (name == null || name.isEmpty() || busid == null || busid.isEmpty()) return;
+        if (host != null && !host.isEmpty()) sharedNames.put(host + "|" + busid, name);
+        sharedNames.put(busid, name);
+    }
 
     final Map<String, Phone> phones = new LinkedHashMap<>();
     final DefaultListModel<Phone> phoneModel = new DefaultListModel<>();
@@ -545,6 +554,7 @@ public class App {
         ph.port = b.port;
         ph.lastSeen = System.currentTimeMillis();
         ph.beacon = b;
+        for (Beacon.Dev d : b.devices) rememberSharedName(host, d.busid, d.product); // sharer's name per device
         if (isNew && phoneList.getSelectedIndex() < 0) phoneList.setSelectedValue(ph, true);
         else if (ph == phoneList.getSelectedValue() && !oldKey.equals(beaconKey(b))) refreshDevices();
         phoneList.repaint();
@@ -902,6 +912,8 @@ public class App {
             // path always contains '/' or '\', so a slash-free path is a name the sharer set)
             if ((name == null || name.isEmpty()) && d.path != null && !d.path.isEmpty()
                     && d.path.indexOf('/') < 0 && d.path.indexOf('\\') < 0) name = d.path;
+            boolean fromSharer = name != null && !name.isEmpty(); // a name the sharer advertised (not our generic fallback)
+            if (fromSharer) rememberSharedName(target.viaRelay ? null : target.host, d.busid, name);
             if (name == null || name.isEmpty()) name = Proto.knownName(d.idVendor, d.idProduct);
             devModel.addRow(new Object[]{name, String.format("%04X:%04X", d.idVendor, d.idProduct), d.busid,
                     Proto.speedName(d.speed), "ว่าง — พร้อมเชื่อมต่อ"});
@@ -1007,8 +1019,13 @@ public class App {
             portModel.setRowCount(0);
             java.util.Set<String> att = new java.util.HashSet<>();
             for (UsbipCli.Port p : ports) {
-                portModel.addRow(new Object[]{p.port, p.description, p.remote});
-                if (p.remote != null && !p.remote.isEmpty()) att.add(p.remote.trim());
+                String host = p.host(), busid = p.busid();
+                // show the name the sharer set (matches the device list), falling back to the OS descriptor
+                String shown = sharedNames.get(host + "|" + busid);
+                if (shown == null) shown = sharedNames.get(busid);
+                if (shown == null || shown.isEmpty()) shown = p.description;
+                portModel.addRow(new Object[]{p.port, shown, p.remote});
+                if (!host.isEmpty()) att.add(host);
             }
             attachedHosts = att; // machines we are currently attached to are never auto-removed
             if (sel >= 0 && sel < portModel.getRowCount()) portTable.setRowSelectionInterval(sel, sel);
