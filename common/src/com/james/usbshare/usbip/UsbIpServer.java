@@ -30,6 +30,11 @@ public class UsbIpServer {
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
     private volatile Listener listener;
     public final AtomicLong urbCount = new AtomicLong();
+    // live traffic as seen by the sharer (works for every transport: LAN, Radmin, relay):
+    // bytesToClient = responses sent back ("ตอบ"), bytesFromClient = command/OUT data received ("ถาม").
+    public final AtomicLong bytesToClient = new AtomicLong();
+    public final AtomicLong bytesFromClient = new AtomicLong();
+    public volatile long lastTrafficMs;
 
     public UsbIpServer(Backend backend, int port) {
         this.backend = backend;
@@ -37,6 +42,8 @@ public class UsbIpServer {
     }
 
     public void setListener(Listener l) { this.listener = l; }
+
+    private void bump(AtomicLong counter, long n) { counter.addAndGet(n); lastTrafficMs = System.currentTimeMillis(); }
 
     public int getPort() { return serverSocket != null ? serverSocket.getLocalPort() : port; }
 
@@ -199,6 +206,8 @@ public class UsbIpServer {
                 if (c == null) return;
                 if (c.command == Proto.CMD_SUBMIT) {
                     urbCount.incrementAndGet();
+                    if (c.direction == Proto.DIR_OUT && c.data != null) bump(bytesFromClient, c.data.length); // "ถาม" + ข้อมูลที่เขียนมา
+                    else bump(bytesFromClient, 0);
                     final int seq = c.seqnum;
                     final boolean iso = c.isIso();
                     if (dev.isGone()) {
@@ -213,6 +222,7 @@ public class UsbIpServer {
                         byte[] payload = (mine.direction == Proto.DIR_IN) ? inData : null;
                         if (payload != null && len > payload.length) len = payload.length;
                         if (payload != null && len > mine.transferBufferLength) len = mine.transferBufferLength;
+                        if (payload != null) bump(bytesToClient, len); // "ตอบ" — ข้อมูลที่ส่งกลับไปเครื่องลูก
                         send(Proto.encodeRetSubmit(seq, status, payload, len, iso));
                     });
                 } else if (c.command == Proto.CMD_UNLINK) {

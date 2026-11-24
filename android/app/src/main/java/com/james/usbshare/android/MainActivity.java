@@ -41,6 +41,14 @@ public class MainActivity extends Activity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private TextView status, ipText, logView, warnView;
+    private long lastUrb, lastTrafMs;
+
+    static String humanBytes(long n) {
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return String.format("%.1f KB", n / 1024.0);
+        if (n < 1024L * 1024 * 1024) return String.format("%.2f MB", n / (1024.0 * 1024));
+        return String.format("%.2f GB", n / (1024.0 * 1024 * 1024));
+    }
     private Button toggle;
     private LinearLayout deviceBox;
     private CheckBox keepScreen;
@@ -432,7 +440,16 @@ public class MainActivity extends Activity {
         if (running) {
             status.setText("● กำลังแชร์");
             status.setTextColor(GREEN);
-            ipText.setText(netText(ips) + "\nURB ที่รับส่งแล้ว: " + svc.server().urbCount.get());
+            com.james.usbshare.usbip.UsbIpServer s = svc.server();
+            long now = System.currentTimeMillis();
+            long urb = s.urbCount.get();
+            double secs = Math.max(0.001, (now - lastTrafMs) / 1000.0);
+            long rate = (long) ((urb - lastUrb) / secs);
+            lastUrb = urb; lastTrafMs = now;
+            boolean moving = now - s.lastTrafficMs < 1500;
+            ipText.setText(netText(ips) + "\n" + (moving ? "● " : "○ ")
+                    + String.format("ถาม-ตอบ %,d ครั้ง (%,d/วิ)   ▼รับ %s   ▲ตอบ %s",
+                    urb, rate, humanBytes(s.bytesFromClient.get()), humanBytes(s.bytesToClient.get())));
             toggle.setText("หยุดแชร์");
             toggle.setBackground(round(RED, 0));
         } else {

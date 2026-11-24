@@ -99,6 +99,8 @@ public class App {
     final JTable portTable = new JTable(portModel);
     final JTextArea logArea = new JTextArea();
     final JLabel usbipStatus = new JLabel();
+    final JLabel trafficLabel = new JLabel("รับ-ส่งข้อมูล: — (ดาต้าจริงจะวิ่งเมื่อเชื่อมผ่านรหัสจับคู่ และกำลังใช้งานอุปกรณ์)");
+    private long lastUp, lastDown, lastTrafficMs;
     final JCheckBox lowLatency = new JCheckBox("โหมดหน่วงต่ำ (แนะนำสำหรับสาย OBD / Serial)", true);
     final List<Proto.DeviceInfo> shownDevices = new ArrayList<>();
     final UsbipCli cli = new UsbipCli();
@@ -456,8 +458,16 @@ public class App {
         }));
         portButtons.add(detach);
         portButtons.add(detachAll);
-        portCard.add(portButtons, BorderLayout.SOUTH);
+        trafficLabel.setFont(FONT);
+        trafficLabel.setForeground(SILVER);
+        trafficLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(6, 2, 0, 2));
+        JPanel portSouth = new JPanel(new BorderLayout());
+        portSouth.setOpaque(false);
+        portSouth.add(portButtons, BorderLayout.NORTH);
+        portSouth.add(trafficLabel, BorderLayout.SOUTH);
+        portCard.add(portSouth, BorderLayout.SOUTH);
         center.add(portCard);
+        startTrafficMeter();
         client.add(center, BorderLayout.CENTER);
         JTabbedPane tabs = new JTabbedPane();
         tabs.setFont(FONT_B);
@@ -1032,6 +1042,38 @@ public class App {
             refreshPorts();
             SwingUtilities.invokeLater(this::refreshDevices);
         });
+    }
+
+    /** Live "data is moving" readout, updated twice a second from the relay traffic counters. */
+    void startTrafficMeter() {
+        lastTrafficMs = System.currentTimeMillis();
+        lastUp = com.james.usbshare.relay.Relay.Meter.up.get();
+        lastDown = com.james.usbshare.relay.Relay.Meter.down.get();
+        new Timer(500, e -> {
+            long now = System.currentTimeMillis();
+            long up = com.james.usbshare.relay.Relay.Meter.up.get();
+            long down = com.james.usbshare.relay.Relay.Meter.down.get();
+            double secs = Math.max(0.001, (now - lastTrafficMs) / 1000.0);
+            long upRate = (long) ((up - lastUp) / secs);
+            long downRate = (long) ((down - lastDown) / secs);
+            lastUp = up; lastDown = down; lastTrafficMs = now;
+            boolean moving = now - com.james.usbshare.relay.Relay.Meter.lastActivityMs < 1000;
+            if (up == 0 && down == 0) {
+                trafficLabel.setForeground(SILVER);
+                trafficLabel.setText("รับ-ส่งข้อมูล: — (ดาต้าจริงจะวิ่งเมื่อเชื่อมผ่านรหัสจับคู่ และกำลังใช้งานอุปกรณ์)");
+                return;
+            }
+            trafficLabel.setForeground(moving ? new Color(0x37D67A) : SILVER);
+            trafficLabel.setText(String.format("%s รับ-ส่งข้อมูล (รหัสจับคู่)   ▲ ส่ง/ถาม %s (%s/s)   ▼ รับ/ตอบ %s (%s/s)",
+                    moving ? "●" : "○", fmtBytes(up), fmtBytes(upRate), fmtBytes(down), fmtBytes(downRate)));
+        }).start();
+    }
+
+    static String fmtBytes(long n) {
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return String.format("%.1f KB", n / 1024.0);
+        if (n < 1024L * 1024 * 1024) return String.format("%.2f MB", n / (1024.0 * 1024));
+        return String.format("%.2f GB", n / (1024.0 * 1024 * 1024));
     }
 
     /** Runs on the work thread. */

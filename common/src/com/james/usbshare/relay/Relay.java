@@ -253,6 +253,7 @@ public final class Relay {
         private static final java.util.Set<Link> LIVE = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
         private final com.james.usbshare.usbip.Proto.NameProvider names;
+        private final boolean pcSide; // only the PC side feeds the live traffic meter
 
         Link(Socket tcp, Connector reconnector, String who, Consumer<String> log) throws IOException {
             this(tcp, reconnector, who, log, null);
@@ -266,6 +267,7 @@ public final class Relay {
             this.who = who;
             this.log = log;
             this.names = names;
+            this.pcSide = who != null && who.startsWith("pc-");
             this.dir = who.startsWith("pc-") ? 1 : 2;
             E2E e = null;
             try { e = new E2E(); } catch (java.security.GeneralSecurityException ex) { log.accept("เข้ารหัสไม่ได้: " + ex.getMessage()); }
@@ -430,6 +432,7 @@ public final class Relay {
                     try {
                         if (legacy) {
                             tcpOut.write(d, 0, len);
+                            if (pcSide) Meter.addDown(len);
                         } else {
                             if (len < 4) return;
                             long seq = ((long) (d[0] & 0xff) << 24) | ((d[1] & 0xff) << 16) | ((d[2] & 0xff) << 8) | (d[3] & 0xff);
@@ -446,7 +449,8 @@ public final class Relay {
                                     return;
                                 }
                                 tcpOut.write(plain);
-                            } else tcpOut.write(d, 4, len - 4);
+                                if (pcSide) Meter.addDown(plain.length); // phone -> PC: a response coming back
+                            } else { tcpOut.write(d, 4, len - 4); if (pcSide) Meter.addDown(len - 4); }
                         }
                         tcpOut.flush();
                     } catch (IOException e) {
@@ -497,6 +501,7 @@ public final class Relay {
                 InputStream in = com.james.usbshare.usbip.Proto.devListNames(tcp.getInputStream(), names);
                 int n;
                 while ((n = in.read(buf)) > 0) {
+                    if (pcSide) Meter.addUp(n); // PC -> phone: a request going out
                     if (legacy) {
                         MiniWebSocket w;
                         synchronized (lock) { w = ws; }
@@ -538,6 +543,19 @@ public final class Relay {
     }
 
     // =====================================================================
+    /**
+     * Live counters for the USB/IP traffic that passes through this app over the relay, so the PC can
+     * show data actually moving. Only PC-side links update it (the phone runs in its own process).
+     * up = PC -> phone (requests / "ถาม"), down = phone -> PC (responses / "ตอบ").
+     */
+    public static final class Meter {
+        public static final java.util.concurrent.atomic.AtomicLong up = new java.util.concurrent.atomic.AtomicLong();
+        public static final java.util.concurrent.atomic.AtomicLong down = new java.util.concurrent.atomic.AtomicLong();
+        public static volatile long lastActivityMs;
+        static void addUp(long n) { up.addAndGet(n); lastActivityMs = System.currentTimeMillis(); }
+        static void addDown(long n) { down.addAndGet(n); lastActivityMs = System.currentTimeMillis(); }
+    }
+
     // Phone side
     // =====================================================================
 
