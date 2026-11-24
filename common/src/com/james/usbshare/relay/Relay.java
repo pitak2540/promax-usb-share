@@ -552,8 +552,8 @@ public final class Relay {
         public static final java.util.concurrent.atomic.AtomicLong up = new java.util.concurrent.atomic.AtomicLong();
         public static final java.util.concurrent.atomic.AtomicLong down = new java.util.concurrent.atomic.AtomicLong();
         public static volatile long lastActivityMs;
-        static void addUp(long n) { up.addAndGet(n); lastActivityMs = System.currentTimeMillis(); }
-        static void addDown(long n) { down.addAndGet(n); lastActivityMs = System.currentTimeMillis(); }
+        public static void addUp(long n) { up.addAndGet(n); lastActivityMs = System.currentTimeMillis(); }
+        public static void addDown(long n) { down.addAndGet(n); lastActivityMs = System.currentTimeMillis(); }
     }
 
     // Phone side

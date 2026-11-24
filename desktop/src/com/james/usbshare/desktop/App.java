@@ -99,8 +99,10 @@ public class App {
     final JTable portTable = new JTable(portModel);
     final JTextArea logArea = new JTextArea();
     final JLabel usbipStatus = new JLabel();
-    final JLabel trafficLabel = new JLabel("รับ-ส่งข้อมูล: — (ดาต้าจริงจะวิ่งเมื่อเชื่อมผ่านรหัสจับคู่ และกำลังใช้งานอุปกรณ์)");
+    final JLabel trafficLabel = new JLabel("รับ-ส่งข้อมูล: — (จะแสดงเมื่อกำลังใช้งานอุปกรณ์)");
     private long lastUp, lastDown, lastTrafficMs;
+    final LocalMeterProxy meterProxy = new LocalMeterProxy();
+    final JCheckBox meterLan = new JCheckBox("นับข้อมูลฝั่งคอมกับการเชื่อมตรง (LAN/Radmin) ด้วย — ห้ามปิดโปรแกรมระหว่างใช้งาน", true);
     final JCheckBox lowLatency = new JCheckBox("โหมดหน่วงต่ำ (แนะนำสำหรับสาย OBD / Serial)", true);
     final List<Proto.DeviceInfo> shownDevices = new ArrayList<>();
     final UsbipCli cli = new UsbipCli();
@@ -461,10 +463,24 @@ public class App {
         trafficLabel.setFont(FONT);
         trafficLabel.setForeground(SILVER);
         trafficLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(6, 2, 0, 2));
+        meterLan.setFont(FONT);
+        meterLan.setForeground(SILVER);
+        meterLan.setOpaque(false);
+        meterLan.setSelected(prefs.getBoolean("meterLan", true)); // ผู้ใช้ขอให้เปิดไว้ตลอด
+        meterLan.addActionListener(e -> {
+            prefs.putBoolean("meterLan", meterLan.isSelected());
+            if (!meterLan.isSelected()) { work.execute(meterProxy::stopAll);
+                log("ปิดการนับข้อมูลฝั่งคอมสำหรับการเชื่อมตรงแล้ว (การเชื่อมใหม่จะต่อตรงไม่ผ่านตัวนับ)"); }
+            else log("เปิดนับข้อมูลฝั่งคอมสำหรับการเชื่อมตรง — ห้ามปิดโปรแกรมระหว่างใช้งาน");
+        });
         JPanel portSouth = new JPanel(new BorderLayout());
         portSouth.setOpaque(false);
         portSouth.add(portButtons, BorderLayout.NORTH);
-        portSouth.add(trafficLabel, BorderLayout.SOUTH);
+        JPanel meterRows = new JPanel(new GridLayout(2, 1, 0, 2));
+        meterRows.setOpaque(false);
+        meterRows.add(trafficLabel);
+        meterRows.add(meterLan);
+        portSouth.add(meterRows, BorderLayout.SOUTH);
         portCard.add(portSouth, BorderLayout.SOUTH);
         center.add(portCard);
         startTrafficMeter();
@@ -1011,10 +1027,22 @@ public class App {
                     "คำเตือน OpenPort", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
             if (a != JOptionPane.YES_OPTION) return;
         }
-        final String host = ph.host;
-        final int port = ph.port;
+        String aHost = ph.host;
+        int aPort = ph.port;
+        // route direct (non-relay) attachments through the local meter so the PC can count bytes too
+        if (meterLan.isSelected() && !ph.viaRelay) {
+            try {
+                aPort = meterProxy.localPortFor(ph.host, ph.port);
+                aHost = "127.0.0.1";
+            } catch (java.io.IOException ex) {
+                log("เปิดตัวนับข้อมูลไม่ได้ ใช้การเชื่อมตรงแทน: " + ex.getMessage());
+                aHost = ph.host; aPort = ph.port;
+            }
+        }
+        final String host = aHost;
+        final int port = aPort;
         final boolean ll = lowLatency.isSelected();
-        log("กำลังเชื่อมต่อ " + todo.size() + " อุปกรณ์จาก " + (ph.viaRelay ? "รหัส " + ph.relayCode : host)
+        log("กำลังเชื่อมต่อ " + todo.size() + " อุปกรณ์จาก " + (ph.viaRelay ? "รหัส " + ph.relayCode : ph.host)
                 + " ... (ถ้ามือถือถามสิทธิ์ USB ให้กดตกลงทุกตัว)");
         work.execute(() -> {
             int ok = 0;
@@ -1060,7 +1088,7 @@ public class App {
             boolean moving = now - com.james.usbshare.relay.Relay.Meter.lastActivityMs < 1000;
             if (up == 0 && down == 0) {
                 trafficLabel.setForeground(SILVER);
-                trafficLabel.setText("รับ-ส่งข้อมูล: — (ดาต้าจริงจะวิ่งเมื่อเชื่อมผ่านรหัสจับคู่ และกำลังใช้งานอุปกรณ์)");
+                trafficLabel.setText("รับ-ส่งข้อมูล: — (จะแสดงเมื่อกำลังใช้งานอุปกรณ์)");
                 return;
             }
             trafficLabel.setForeground(moving ? new Color(0x37D67A) : SILVER);
@@ -1092,6 +1120,13 @@ public class App {
             java.util.Set<String> att = new java.util.HashSet<>();
             for (UsbipCli.Port p : ports) {
                 String host = p.host(), busid = p.busid();
+                // a 127.0.0.1 attachment is really the local meter proxy — resolve the true sharer host
+                if ("127.0.0.1".equals(host)) {
+                    try {
+                        String real = meterProxy.hostForPort(Integer.parseInt(p.remote.replaceFirst(".*:(\\d+)/.*", "$1")));
+                        if (real != null) host = real;
+                    } catch (Exception ignored) {}
+                }
                 // show the name the sharer set (matches the device list), falling back to the OS descriptor
                 String shown = sharedNames.get(host + "|" + busid);
                 if (shown == null) shown = sharedNames.get(busid);
