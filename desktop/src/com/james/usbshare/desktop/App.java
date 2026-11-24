@@ -43,6 +43,8 @@ public class App {
         String host;
         int port = Proto.PORT;
         String name = "";
+        String customName = "";   // name the user set for this machine; takes priority and persists when saved
+        boolean saved;            // remembered across restarts; never auto-removed
         long lastSeen;
         boolean manual;
         boolean viaTailscale;
@@ -51,14 +53,29 @@ public class App {
         boolean relayOnline = true;
         String relayCode;
         Beacon beacon;
+
+        /** Stable id used as the key for saving/naming this machine. */
+        String id() { return viaRelay ? "relay:" + relayCode : host; }
+
+        /** The label to show: the user's custom name wins, then the advertised name, then the address. */
+        String shownName() {
+            if (!customName.isEmpty()) return customName;
+            return name.isEmpty() ? (viaRelay ? "มือถือ" : host) : name;
+        }
+
         @Override public String toString() {
+            String star = saved ? "★ " : "";
             if (viaRelay)
-                return (name.isEmpty() ? "มือถือ" : name) + "  [รหัส " + relayCode + "]" + (relayOnline ? "" : "  (ออฟไลน์)");
+                return star + shownName() + "  [รหัส " + relayCode + "]" + (relayOnline ? "" : "  (ออฟไลน์)");
             boolean alive = manual || viaTailscale || viaRadmin || System.currentTimeMillis() - lastSeen < 15000;
             String tag = viaTailscale ? "  [Tailscale]" : viaRadmin ? "  [Radmin VPN]" : "";
-            return (name.isEmpty() ? host : name + "  (" + host + ")") + tag + (alive ? "" : "  (ไม่เห็นสัญญาณ)");
+            String addr = customName.isEmpty() && name.isEmpty() ? "" : "  (" + host + ")";
+            return star + shownName() + addr + tag + (alive ? "" : "  (ไม่เห็นสัญญาณ)");
         }
     }
+
+    static final long OFFLINE_MS = 20000; // a non-saved machine is removed this long after it stops answering
+    volatile java.util.Set<String> attachedHosts = new java.util.HashSet<>();
 
     final Map<String, Phone> phones = new LinkedHashMap<>();
     final DefaultListModel<Phone> phoneModel = new DefaultListModel<>();
@@ -322,7 +339,19 @@ public class App {
         phoneList.setSelectionForeground(Color.WHITE);
         phoneList.setFixedCellHeight(34);
         phoneList.addListSelectionListener(e -> { if (!e.getValueIsAdjusting()) refreshDevices(); });
-        phonesCard.add(scroll(phoneList), BorderLayout.CENTER);
+        JPanel listWrap = new JPanel(new BorderLayout(0, 6));
+        listWrap.setOpaque(false);
+        listWrap.add(scroll(phoneList), BorderLayout.CENTER);
+        JButton saveBtn = button("★ บันทึก/ตั้งชื่อเครื่อง", LINE);
+        saveBtn.addActionListener(e -> saveOrNameSelected());
+        JButton delBtn = button("ลบเครื่อง", LINE);
+        delBtn.addActionListener(e -> removeSelectedPhone());
+        JPanel listBtns = new JPanel(new GridLayout(1, 2, 6, 0));
+        listBtns.setOpaque(false);
+        listBtns.add(saveBtn);
+        listBtns.add(delBtn);
+        listWrap.add(listBtns, BorderLayout.SOUTH);
+        phonesCard.add(listWrap, BorderLayout.CENTER);
         JPanel manual = new JPanel(new BorderLayout(6, 6));
         manual.setOpaque(false);
         JTextField ipField = new JTextField();
@@ -350,6 +379,10 @@ public class App {
         crossBtns.add(rv);
         manual.add(crossBtns, BorderLayout.SOUTH);
         JPopupMenu pm = new JPopupMenu();
+        JMenuItem sv = new JMenuItem("บันทึก/ตั้งชื่อเครื่อง...");
+        sv.setFont(FONT);
+        sv.addActionListener(e -> saveOrNameSelected());
+        pm.add(sv);
         JMenuItem rm = new JMenuItem("ลบออกจากรายการ");
         rm.setFont(FONT);
         rm.addActionListener(e -> removeSelectedPhone());
@@ -443,8 +476,10 @@ public class App {
         new Timer(60000, e -> updateLicenseLabel()).start();
         if (!license.status().allowed()) SwingUtilities.invokeLater(() -> license.showDialog());
         startBeaconListener();
+        loadSavedPhones(); // show remembered machines right away (offline until seen)
         new Timer(3000, e -> { phoneList.repaint(); }).start();
         new Timer(6000, e -> work.execute(this::refreshPorts)).start();
+        new Timer(5000, e -> prunePhones()).start(); // drop non-saved machines once they go offline
         new Timer(30000, e -> scanTailscale(false)).start();
         scanTailscale(false);
         for (String c : prefs.get("relayCodes", "").split(",")) if (!c.isEmpty()) addRelay(c, false);
@@ -624,6 +659,7 @@ public class App {
                 ph.relayCode = code;
                 ph.relayOnline = st.online;
                 ph.name = st.name;
+                if (savedIds().contains(key)) { ph.saved = true; ph.customName = prefs.get("peerName." + key, ""); }
                 phones.put(key, ph);
                 phoneModel.addElement(ph);
                 saveRelayCodes();
@@ -666,6 +702,7 @@ public class App {
     void removeSelectedPhone() {
         Phone ph = phoneList.getSelectedValue();
         if (ph == null) return;
+        forgetSaved(ph); // a machine the user deletes is no longer remembered
         if (ph.viaRelay) {
             Relay.Forwarder f = forwarders.remove(ph.relayCode);
             if (f != null) f.stop();
@@ -677,6 +714,99 @@ public class App {
         phoneModel.removeElement(ph);
         devModel.setRowCount(0);
         shownDevices.clear();
+    }
+
+    // ---------- remembered machines (save + custom name + auto-remove the rest) ----------
+
+    private java.util.Set<String> savedIds() {
+        java.util.Set<String> s = new java.util.LinkedHashSet<>();
+        for (String id : prefs.get("savedPeers", "").split("\n")) if (!id.isEmpty()) s.add(id);
+        return s;
+    }
+
+    private void writeSavedIds(java.util.Set<String> ids) {
+        prefs.put("savedPeers", String.join("\n", ids));
+    }
+
+    private void markSaved(Phone ph) {
+        ph.saved = true;
+        java.util.Set<String> ids = savedIds();
+        ids.add(ph.id());
+        writeSavedIds(ids);
+        prefs.put("peerName." + ph.id(), ph.customName);
+        prefs.put("peerPort." + ph.id(), String.valueOf(ph.port));
+    }
+
+    private void forgetSaved(Phone ph) {
+        ph.saved = false;
+        java.util.Set<String> ids = savedIds();
+        if (ids.remove(ph.id())) writeSavedIds(ids);
+        prefs.remove("peerName." + ph.id());
+        prefs.remove("peerPort." + ph.id());
+    }
+
+    /** Save the selected machine and/or give it a name. Saved machines stay in the list even when offline. */
+    void saveOrNameSelected() {
+        Phone ph = phoneList.getSelectedValue();
+        if (ph == null) { JOptionPane.showMessageDialog(frame, "เลือกเครื่องก่อน"); return; }
+        String seed = ph.customName.isEmpty() ? (ph.name.isEmpty() ? ph.host : ph.name) : ph.customName;
+        Object v = JOptionPane.showInputDialog(frame,
+                "ตั้งชื่อเครื่องนี้ (" + (ph.viaRelay ? "รหัส " + ph.relayCode : ph.host) + ")\n"
+                        + "เครื่องที่ตั้งชื่อ/บันทึกจะอยู่ในรายการตลอด แม้ปิดโปรแกรมหรือยังไม่ออนไลน์\nเว้นว่างไว้ก็บันทึกได้",
+                "บันทึก/ตั้งชื่อเครื่อง", JOptionPane.PLAIN_MESSAGE, null, null, seed);
+        if (v == null) return; // ยกเลิก
+        ph.customName = v.toString().trim();
+        markSaved(ph);
+        log("บันทึกเครื่อง: " + ph.shownName());
+        phoneList.repaint();
+    }
+
+    /** Re-create saved machines on startup so they appear (offline) until they are seen again. */
+    void loadSavedPhones() {
+        for (String id : savedIds()) {
+            if (id.startsWith("relay:")) continue; // relay machines come back from relayCodes
+            if (phones.containsKey(id)) continue;
+            Phone ph = new Phone();
+            ph.host = id;
+            ph.saved = true;
+            ph.manual = true; // selectable/attachable by its stored address even without a beacon
+            ph.customName = prefs.get("peerName." + id, "");
+            try { ph.port = Integer.parseInt(prefs.get("peerPort." + id, String.valueOf(Proto.PORT))); } catch (Exception ignored) {}
+            ph.viaTailscale = Tailscale.isTailscaleIp(id);
+            ph.viaRadmin = RadminVpn.isRadminIp(id);
+            phones.put(id, ph);
+            phoneModel.addElement(ph);
+        }
+    }
+
+    /** Removes machines the user did not save once they go offline and nothing from them is attached. */
+    void prunePhones() {
+        long now = System.currentTimeMillis();
+        // keep reachable manual/Tailscale machines fresh (they do not broadcast), so only dead ones are pruned
+        for (Phone p : new ArrayList<>(phones.values())) {
+            if (p.viaRelay || p.beacon != null) continue;
+            if (now - p.lastSeen <= OFFLINE_MS / 2) continue;
+            final Phone pp = p;
+            scan.execute(() -> {
+                if (Tailscale.answersUsbIp(pp.host, pp.port, 2000)) {
+                    pp.lastSeen = System.currentTimeMillis();
+                    SwingUtilities.invokeLater(phoneList::repaint);
+                }
+            });
+        }
+        SwingUtilities.invokeLater(() -> {
+            Phone sel = phoneList.getSelectedValue();
+            long t = System.currentTimeMillis();
+            for (Phone p : new ArrayList<>(phones.values())) {
+                if (p.saved || p.viaRelay || p == sel) continue;       // saved / relay / in-use stay
+                if (attachedHosts.contains(p.host)) continue;          // still attached → keep
+                if (t - p.lastSeen >= OFFLINE_MS) {                     // stopped answering → drop it
+                    phones.remove(p.host);
+                    phoneModel.removeElement(p);
+                    log("เอาเครื่องที่ออฟไลน์ออกจากรายการ: " + p.shownName() + " (ยังไม่ได้บันทึก)");
+                }
+            }
+        });
     }
 
     void addManual(String ip) {
@@ -759,6 +889,7 @@ public class App {
     void fillDevices(Phone target, List<Proto.DeviceInfo> list, Beacon beacon, String err) {
         Phone sel = phoneList.getSelectedValue();
         if (sel != target) return;
+        if (err == null) target.lastSeen = System.currentTimeMillis(); // it answered → keep it alive in the list
         String host = target.viaRelay ? "รหัส " + target.relayCode : target.host;
         devModel.setRowCount(0);
         shownDevices.clear();
@@ -874,7 +1005,12 @@ public class App {
         SwingUtilities.invokeLater(() -> {
             int sel = portTable.getSelectedRow();
             portModel.setRowCount(0);
-            for (UsbipCli.Port p : ports) portModel.addRow(new Object[]{p.port, p.description, p.remote});
+            java.util.Set<String> att = new java.util.HashSet<>();
+            for (UsbipCli.Port p : ports) {
+                portModel.addRow(new Object[]{p.port, p.description, p.remote});
+                if (p.remote != null && !p.remote.isEmpty()) att.add(p.remote.trim());
+            }
+            attachedHosts = att; // machines we are currently attached to are never auto-removed
             if (sel >= 0 && sel < portModel.getRowCount()) portTable.setRowSelectionInterval(sel, sel);
         });
     }
