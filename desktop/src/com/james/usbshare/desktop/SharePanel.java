@@ -96,11 +96,14 @@ public class SharePanel extends JPanel {
         rename.addActionListener(e -> renameSelected());
         JButton refresh = app.button("รีเฟรช", App.LINE);
         refresh.addActionListener(e -> refresh());
+        JButton fixNet = app.button("เปิดไฟร์วอลล์ / แก้พอร์ตอัตโนมัติ", new Color(0x1C7C4A));
+        fixNet.addActionListener(e -> autoFixConnection());
         status.setFont(App.FONT);
         btns.add(share);
         btns.add(unshare);
         btns.add(rename);
         btns.add(refresh);
+        btns.add(fixNet);
         btns.add(status);
         list.add(btns, BorderLayout.SOUTH);
         add(list, BorderLayout.CENTER);
@@ -288,6 +291,92 @@ public class SharePanel extends JPanel {
             app.log((share ? "แชร์ " : "เลิกแชร์ ") + d.name + " (" + d.busid + "): " + (rc == 0 ? "สำเร็จ" : "ไม่สำเร็จ (" + rc + ")"));
             refresh();
         });
+    }
+
+    // ---------- one-click firewall / port fix for แม่-ลูก ----------
+
+    /** Is something listening on this PC's USB/IP port? (usbipd opens 3240 once a device is shared.) */
+    private static boolean portListening(int port) {
+        try (java.net.Socket s = new java.net.Socket()) {
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", port), 1200);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Opens the Windows Firewall for the ports the แม่-ลูก link uses (TCP 3240 for USB/IP, UDP 3241 for
+     * LAN discovery), makes sure the usbipd service is running, then checks the port is actually open.
+     * One UAC prompt does everything. A full firewall-off switch is offered only if opening the ports is
+     * not enough, because turning the whole firewall off is a security risk.
+     */
+    void autoFixConnection() {
+        String exe = usbipdExe();
+        work.execute(() -> {
+            app.log("กำลังเปิดไฟร์วอลล์/แก้พอร์ตอัตโนมัติ... (ถ้ามีหน้าต่างขอสิทธิ์ Administrator ให้กด Yes)");
+            int rc = runFirewallFix(exe, false);
+            boolean listening = portListening(Proto.PORT);
+            if (rc == 0) app.log("เปิดพอร์ตไฟร์วอลล์ TCP " + Proto.PORT + " และ UDP " + Beacon.PORT + " ให้แล้ว + ตั้ง usbipd ให้ทำงานอัตโนมัติ");
+            else app.log("ยังแก้ไฟร์วอลล์ไม่สำเร็จ (อาจกดยกเลิกหน้าต่างสิทธิ์ หรือสิทธิ์ไม่พอ)");
+            app.log(listening
+                    ? "ตรวจพอร์ต " + Proto.PORT + ": เปิดรับแล้ว ✓ เครื่องลูกเชื่อมได้เลย"
+                    : "ตรวจพอร์ต " + Proto.PORT + ": ยังไม่มีตัวรับฟัง — ต้อง 'แชร์' อุปกรณ์อย่างน้อย 1 ชิ้นก่อน (usbipd จะเปิดพอร์ตเมื่อมีการแชร์)");
+            SwingUtilities.invokeLater(() -> afterFix(rc, listening, exe));
+        });
+    }
+
+    private void afterFix(int rc, boolean listening, String exe) {
+        if (rc == 0 && listening) {
+            JOptionPane.showMessageDialog(app.frame,
+                    "เรียบร้อย! เปิดไฟร์วอลล์พอร์ตที่ใช้ให้แล้ว และพอร์ต " + Proto.PORT + " กำลังเปิดรับ\nให้เครื่องลูกกดเชื่อมต่อได้เลย");
+            return;
+        }
+        StringBuilder msg = new StringBuilder("เปิดไฟร์วอลล์ให้พอร์ตที่ใช้แล้ว");
+        if (!listening) msg.append("\n\nแต่ยังไม่เห็นตัวรับฟังที่พอร์ต ").append(Proto.PORT)
+                .append(" — ปกติเพราะยังไม่ได้ 'แชร์' อุปกรณ์ หรือ usbipd ไม่ทำงาน\nลองแชร์อุปกรณ์สัก 1 ชิ้นแล้วลองใหม่");
+        msg.append("\n\nถ้ายังเชื่อมไม่ได้จริง ๆ จะลอง 'ปิดไฟร์วอลล์ทั้งหมดชั่วคราว' ไหม?\n")
+           .append("(ไม่แนะนำ ลดความปลอดภัยเครื่อง — อย่าลืมเปิดกลับหลังใช้งาน)");
+        int a = JOptionPane.showConfirmDialog(app.frame, msg.toString(), "แก้พอร์ตอัตโนมัติ",
+                JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (a == JOptionPane.YES_OPTION) {
+            work.execute(() -> {
+                int rc2 = runFirewallFix(exe, true);
+                app.log(rc2 == 0 ? "ปิดไฟร์วอลล์ทั้งหมดชั่วคราวแล้ว — อย่าลืมเปิดกลับที่ Windows Security หลังใช้งาน"
+                        : "ปิดไฟร์วอลล์ไม่สำเร็จ (ยกเลิกสิทธิ์?)");
+            });
+        }
+    }
+
+    /** Runs the firewall/service fix elevated (one UAC). Returns the process exit code (0 = ok). */
+    private int runFirewallFix(String exe, boolean disableAllFirewall) {
+        try {
+            StringBuilder bat = new StringBuilder("@echo off\r\n");
+            bat.append("netsh advfirewall firewall delete rule name=\"PROMAX USB Share\" >nul 2>&1\r\n");
+            bat.append("netsh advfirewall firewall delete rule name=\"PROMAX USB Share Beacon\" >nul 2>&1\r\n");
+            bat.append("netsh advfirewall firewall add rule name=\"PROMAX USB Share\" dir=in action=allow protocol=TCP localport=").append(Proto.PORT).append(" profile=any\r\n");
+            bat.append("netsh advfirewall firewall add rule name=\"PROMAX USB Share\" dir=out action=allow protocol=TCP localport=").append(Proto.PORT).append(" profile=any\r\n");
+            bat.append("netsh advfirewall firewall add rule name=\"PROMAX USB Share Beacon\" dir=in action=allow protocol=UDP localport=").append(Beacon.PORT).append(" profile=any\r\n");
+            if (exe != null)
+                bat.append("netsh advfirewall firewall add rule name=\"PROMAX USB Share\" dir=in action=allow program=\"").append(exe).append("\" enable=yes profile=any\r\n");
+            bat.append("sc config usbipd start= auto >nul 2>&1\r\n");
+            bat.append("net start usbipd >nul 2>&1\r\n");
+            if (disableAllFirewall) bat.append("netsh advfirewall set allprofiles state off\r\n");
+            bat.append("exit /b 0\r\n");
+            java.nio.file.Path tmp = java.nio.file.Files.createTempFile("promax-fixnet", ".bat");
+            java.nio.file.Files.write(tmp, bat.toString().getBytes(StandardCharsets.US_ASCII));
+            String ps = "$p = Start-Process -FilePath '" + tmp.toString().replace("'", "''")
+                    + "' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode";
+            Process p = new ProcessBuilder("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
+                    .redirectErrorStream(true).start();
+            p.getInputStream().readAllBytes();
+            p.waitFor(120, TimeUnit.SECONDS);
+            int rc = p.exitValue();
+            try { java.nio.file.Files.deleteIfExists(tmp); } catch (Exception ignored) {}
+            return rc;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     // ---------- pairing code + LAN beacon ----------
