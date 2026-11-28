@@ -114,7 +114,11 @@ public class App {
     LicenseGuard license;
     final JLabel licLabel = new JLabel();
     JButton childDownloadBtn; // created in the constructor (fonts must be ready first)
-    static final String CHILD_DOWNLOAD_URL = "https://github.com/pitak2540/promax-usb-share/releases/latest";
+    // direct-download URL for this brand's installer (GitHub serves the latest asset by this stable path)
+    static String childInstallerUrl() {
+        return "https://github.com/pitak2540/promax-usb-share/releases/latest/download/"
+                + com.james.usbshare.Brand.FILE + "-Setup.exe";
+    }
 
     void updateLicenseLabel() {
         com.james.usbshare.license.License.Status st = license.status();
@@ -133,15 +137,64 @@ public class App {
         if (childDownloadBtn != null) childDownloadBtn.setVisible(licensed);
     }
 
-    /** A registered sharer (เครื่องแม่) hands out the free, receive-only child program (unlimited machines). */
+    /** Registered sharer downloads this brand's installer straight to a file (no GitHub page). */
     void downloadChild() {
-        openUrl(CHILD_DOWNLOAD_URL);
-        JOptionPane.showMessageDialog(frame,
-                "โปรแกรมลูก = ตัวติดตั้งเดียวกันนี้เลย แจกได้ไม่จำกัดเครื่อง\n\n"
-                        + "ที่เครื่องลูก: ติดตั้งแล้วใช้ได้ทันที ไม่ต้องใส่คีย์ ไม่มีหมดอายุ\n"
-                        + "เครื่องลูกจะ 'รับ USB' จากเครื่องแม่ได้ฟรี (แท็บ 'ใช้ USB จากเครื่องอื่น')\n"
-                        + "ส่วนการ 'แชร์ USB ออก' ต้องลงทะเบียนคีย์ (เป็นเครื่องแม่) เท่านั้น",
-                "ดาวน์โหลดโปรแกรมลูก", JOptionPane.INFORMATION_MESSAGE);
+        String file = com.james.usbshare.Brand.FILE + "-Setup.exe";
+        JFileChooser fc = new JFileChooser();
+        fc.setDialogTitle("บันทึกโปรแกรมลูก (ตัวติดตั้ง)");
+        String home = System.getProperty("user.home", ".");
+        java.io.File dl = new java.io.File(home, "Downloads");
+        fc.setSelectedFile(new java.io.File(dl.isDirectory() ? dl : new java.io.File(home), file));
+        if (fc.showSaveDialog(frame) != JFileChooser.APPROVE_OPTION) return;
+        final java.io.File dest = fc.getSelectedFile();
+        final String url = childInstallerUrl();
+        work.execute(() -> {
+            log("กำลังดาวน์โหลดโปรแกรมลูก: " + file + " ...");
+            try {
+                java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(60000);
+                c.setRequestProperty("User-Agent", "UsbShare");
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    log("ดาวน์โหลดไม่สำเร็จ (HTTP " + code + ")");
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame,
+                            "ดาวน์โหลดไม่สำเร็จ (HTTP " + code + ")\nลองใหม่อีกครั้ง หรือเช็กอินเทอร์เน็ต"));
+                    return;
+                }
+                long total = c.getContentLengthLong();
+                java.io.File part = new java.io.File(dest.getAbsolutePath() + ".part");
+                try (java.io.InputStream in = c.getInputStream();
+                     java.io.OutputStream out = new java.io.FileOutputStream(part)) {
+                    byte[] buf = new byte[65536];
+                    long got = 0, lastLog = 0;
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        got += n;
+                        long now = System.currentTimeMillis();
+                        if (now - lastLog > 500) {
+                            lastLog = now;
+                            log(total > 0 ? "ดาวน์โหลด... " + (got * 100 / total) + "%  (" + fmtBytes(got) + "/" + fmtBytes(total) + ")"
+                                          : "ดาวน์โหลด... " + fmtBytes(got));
+                        }
+                    }
+                }
+                dest.delete();
+                if (!part.renameTo(dest)) { java.nio.file.Files.move(part.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING); }
+                log("บันทึกโปรแกรมลูกแล้ว: " + dest.getAbsolutePath());
+                try { new ProcessBuilder("explorer.exe", "/select,", dest.getAbsolutePath()).start(); } catch (Exception ignored) {}
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame,
+                        "บันทึกโปรแกรมลูกแล้ว:\n" + dest.getAbsolutePath()
+                                + "\n\nเอาไฟล์นี้ไปติดตั้งที่เครื่องลูกได้เลย — ไม่ต้องใส่คีย์ รับ USB ได้ฟรี ไม่มีหมดอายุ",
+                        "ดาวน์โหลดเสร็จ", JOptionPane.INFORMATION_MESSAGE));
+            } catch (Exception ex) {
+                log("ดาวน์โหลดไม่สำเร็จ: " + ex.getMessage());
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame,
+                        "ดาวน์โหลดไม่สำเร็จ: " + ex.getMessage()));
+            }
+        });
     }
     final Preferences prefs = Preferences.userRoot().node(com.james.usbshare.Brand.PREFS);
     final Map<String, Relay.Forwarder> forwarders = new LinkedHashMap<>();
