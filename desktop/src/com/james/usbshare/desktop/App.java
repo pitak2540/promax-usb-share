@@ -113,10 +113,35 @@ public class App {
     SharePanel sharePanel;
     LicenseGuard license;
     final JLabel licLabel = new JLabel();
+    JButton childDownloadBtn; // created in the constructor (fonts must be ready first)
+    static final String CHILD_DOWNLOAD_URL = "https://github.com/pitak2540/promax-usb-share/releases/latest";
+
     void updateLicenseLabel() {
         com.james.usbshare.license.License.Status st = license.status();
-        licLabel.setText(com.james.usbshare.license.License.describe(st));
-        licLabel.setForeground(st.kind == com.james.usbshare.license.License.Kind.LICENSED ? GREEN : st.allowed() ? new Color(0xFFB300) : RED);
+        boolean licensed = st.kind == com.james.usbshare.license.License.Kind.LICENSED;
+        // Receiving USB is free and never expires; sharing USB out (เครื่องแม่) needs a key.
+        if (licensed) {
+            licLabel.setText(com.james.usbshare.license.License.describe(st) + "  •  เครื่องแม่ (แชร์ได้)");
+            licLabel.setForeground(GREEN);
+        } else if (st.kind == com.james.usbshare.license.License.Kind.TRIAL) {
+            licLabel.setText("ทดลองแชร์ได้อีก " + st.daysLeft + " วัน  •  รับ USB ฟรี ไม่มีหมดอายุ");
+            licLabel.setForeground(new Color(0xFFB300));
+        } else {
+            licLabel.setText("โหมดลูก: รับ USB ฟรี ไม่มีหมดอายุ  •  การแชร์ต้องลงทะเบียน");
+            licLabel.setForeground(SILVER);
+        }
+        if (childDownloadBtn != null) childDownloadBtn.setVisible(licensed);
+    }
+
+    /** A registered sharer (เครื่องแม่) hands out the free, receive-only child program (unlimited machines). */
+    void downloadChild() {
+        openUrl(CHILD_DOWNLOAD_URL);
+        JOptionPane.showMessageDialog(frame,
+                "โปรแกรมลูก = ตัวติดตั้งเดียวกันนี้เลย แจกได้ไม่จำกัดเครื่อง\n\n"
+                        + "ที่เครื่องลูก: ติดตั้งแล้วใช้ได้ทันที ไม่ต้องใส่คีย์ ไม่มีหมดอายุ\n"
+                        + "เครื่องลูกจะ 'รับ USB' จากเครื่องแม่ได้ฟรี (แท็บ 'ใช้ USB จากเครื่องอื่น')\n"
+                        + "ส่วนการ 'แชร์ USB ออก' ต้องลงทะเบียนคีย์ (เป็นเครื่องแม่) เท่านั้น",
+                "ดาวน์โหลดโปรแกรมลูก", JOptionPane.INFORMATION_MESSAGE);
     }
     final Preferences prefs = Preferences.userRoot().node(com.james.usbshare.Brand.PREFS);
     final Map<String, Relay.Forwarder> forwarders = new LinkedHashMap<>();
@@ -336,6 +361,10 @@ public class App {
         JButton reg = button("ลงทะเบียน", LINE);
         reg.addActionListener(e -> license.showDialog());
         licBox.add(licLabel);
+        childDownloadBtn = button("⬇ ดาวน์โหลดโปรแกรมลูก (แจกได้ไม่จำกัด)", new Color(0x1C7C4A));
+        childDownloadBtn.setVisible(false); // only a registered sharer may hand out the child program
+        childDownloadBtn.addActionListener(e -> downloadChild());
+        licBox.add(childDownloadBtn);
         licBox.add(reg);
         JButton buy = button("ซื้อคีย์ / ติดต่อผู้พัฒนา", new Color(0x06C755));
         buy.addActionListener(e -> license.contactDeveloper());
@@ -520,7 +549,7 @@ public class App {
         updateUsbipStatus();
         updateLicenseLabel();
         new Timer(60000, e -> updateLicenseLabel()).start();
-        if (!license.status().allowed()) SwingUtilities.invokeLater(() -> license.showDialog());
+        // no startup nag: receiving is free and needs no key; the register prompt appears only on SHARE
         startBeaconListener();
         loadSavedPhones(); // show remembered machines right away (offline until seen)
         new Timer(3000, e -> { phoneList.repaint(); }).start();
@@ -667,7 +696,7 @@ public class App {
     }
 
     void askRelayCode() {
-        if (!license.require()) return;
+        // receiving USB is free (no key, no expiry) — only sharing needs a license
         String c = JOptionPane.showInputDialog(frame, "พิมพ์รหัสจับคู่ 8 ตัว ที่แสดงในแอพมือถือ หรือในแท็บ 'แชร์ USB ของคอมนี้' ของคอมเครื่องที่แชร์", "เพิ่มด้วยรหัสจับคู่", JOptionPane.PLAIN_MESSAGE);
         if (c == null) return;
         c = Relay.normalizeCode(c);
@@ -997,7 +1026,7 @@ public class App {
     }
 
     private void attachAll(Phone ph, java.util.List<Proto.DeviceInfo> devices) {
-        if (!license.require()) return;
+        // receiving USB is free and never expires — the sharer (เครื่องแม่) is the paid side
         // keep only the devices that can actually be attached right now
         java.util.List<Proto.DeviceInfo> todo = new ArrayList<>();
         int busy = 0;

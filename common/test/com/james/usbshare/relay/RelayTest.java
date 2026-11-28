@@ -50,16 +50,14 @@ public class RelayTest {
         Relay.Status st = Relay.status(relay, code);
         check(st.online && st.name.startsWith("Test Phone"), "status online with name: " + st.name);
 
-        // a master (PC) with a forged key is refused by the relay itself (phones share without a key)
+        // the SHARER (เครื่องแม่) with a forged key is refused by the relay; receivers (/c) connect for free
         java.util.List<String> flog = new java.util.concurrent.CopyOnWriteArrayList<>();
-        Relay.Forwarder forged = new Relay.Forwarder(relay, code, flog::add)
-                .credentials("JUS1-AFBV4-Y5WMZ-HQWHJ-AAAAU-BABYY-QF5NU-YFF5M-NX452-DY5GH-7WK97-XUXGM-L826H-47W77-ZRSVW-WKWX9-6XAJR-SMTNJ-Y62BJ-PCFFZ-USG64-E5NE5-UKAHY-3BJ4C-RF55P-8XLT", pcDev);
-        forged.start(3300);
-        try (Socket fs = new Socket("127.0.0.1", forged.port())) {
-            fs.setSoTimeout(8000);
-            fs.getOutputStream().write(Proto.encodeOpHeader(Proto.OP_REQ_DEVLIST, 0));
-            check(fs.getInputStream().read() == -1 && flog.stream().anyMatch(m -> m.contains("ไม่อนุญาต")), "relay refuses a master with a forged key: " + flog);
-        }
+        byte[] forgedDev = com.james.usbshare.license.License.deviceHash("test-forged-" + code);
+        Relay.Phone forged = new Relay.Phone(relay, Relay.newCode(), "Forged ปลอม", srv.getPort(), flog::add)
+                .credentials("JUS1-AFBV4-Y5WMZ-HQWHJ-AAAAU-BABYY-QF5NU-YFF5M-NX452-DY5GH-7WK97-XUXGM-L826H-47W77-ZRSVW-WKWX9-6XAJR-SMTNJ-Y62BJ-PCFFZ-USG64-E5NE5-UKAHY-3BJ4C-RF55P-8XLT", forgedDev);
+        forged.start();
+        for (int i = 0; i < 30 && flog.stream().noneMatch(m -> m.contains("ไม่อนุญาต")); i++) Thread.sleep(100);
+        check(!forged.isConnected() && flog.stream().anyMatch(m -> m.contains("ไม่อนุญาต")), "relay refuses a sharer with a forged key: " + flog);
         forged.stop();
 
         long t0 = System.nanoTime();

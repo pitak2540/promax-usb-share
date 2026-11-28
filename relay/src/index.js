@@ -2,9 +2,10 @@
 // can cross networks (mobile data, different Wi-Fi, NAT). Each USB/IP TCP
 // connection from the PC becomes one WebSocket pair through a Durable Object.
 //
-// Licensing model: the "master" (เครื่องแม่) is the licensed PC that attaches devices; its
-// CODE is its device id. Any number of "children" (เครื่องลูก: phones / PCs that only
-// share USB, no key needed) join the master's room by typing that code.
+// Licensing model: the paid side is the SHARER (เครื่องแม่) — the licensed phone/PC that shares
+// its USB out; its CODE is its device id. Any number of RECEIVERS (เครื่องลูก: PCs that only pull
+// USB to use it) join that code for free, no key and no expiry. So the key is checked on the
+// sharer's control link (/p/ctl), not on the receiver (/c/data).
 //
 //   child control : wss://<relay>/p/<CODE>/ctl?name=<name>&dev=<child id>   (kept open, many per room)
 //   PC connection : wss://<relay>/c/<CODE>/data?id=<ID>&child=<child id>&lic=..&dev=..
@@ -115,15 +116,11 @@ export default {
     const m = url.pathname.match(PATH);
     if (!m) return new Response("not found\n", { status: 404 });
     if (m[1] === "p" && m[3] === "ctl") {
-      // children share for free; only a revoked device is refused
-      const d = (url.searchParams.get("dev") || "").toLowerCase();
-      if (/^[0-9a-f]{16}$/.test(d) && REVOKED.has(base32(Uint8Array.from(d.match(/../g).map((h) => parseInt(h, 16))))))
-        return new Response("เครื่องนี้ถูกระงับ", { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
-    }
-    if (m[1] === "c" && m[3] === "data") {
+      // the sharer (เครื่องแม่ ที่แชร์ USB ออก) is the paid side: its control link needs a key (or trial)
       const why = await checkLicense(url, env);
       if (why) return new Response(why, { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } });
     }
+    // the receiver (เครื่องลูก ที่ดึง USB ไปใช้) connects for free: no license check on /c/data
     const stub = env.ROOM.get(env.ROOM.idFromName(m[2]));
     return stub.fetch(req);
   },
