@@ -113,7 +113,6 @@ public class App {
     SharePanel sharePanel;
     LicenseGuard license;
     final JLabel licLabel = new JLabel();
-
     void updateLicenseLabel() {
         com.james.usbshare.license.License.Status st = license.status();
         licLabel.setText(com.james.usbshare.license.License.describe(st));
@@ -413,7 +412,7 @@ public class App {
         client.add(phonesCard, BorderLayout.WEST);
 
         // ---- devices (center)
-        JPanel center = new JPanel(new GridLayout(2, 1, 12, 12));
+        JPanel center = new JPanel(new GridBagLayout());
         center.setOpaque(false);
         JPanel devCard = card("อุปกรณ์ USB บนมือถือที่เลือก");
         styleTable(devTable);
@@ -443,11 +442,15 @@ public class App {
         devButtons.add(refresh);
         devButtons.add(lowLatency);
         devCard.add(devButtons, BorderLayout.SOUTH);
-        center.add(devCard);
+        GridBagConstraints gcTop = new GridBagConstraints();
+        gcTop.gridx = 0; gcTop.gridy = 0; gcTop.fill = GridBagConstraints.BOTH;
+        gcTop.weightx = 1; gcTop.weighty = 1.0; gcTop.insets = new Insets(0, 0, 12, 0);
+        center.add(devCard, gcTop);
 
         JPanel portCard = card("อุปกรณ์ที่เชื่อมอยู่บนคอมนี้ (ดูใน Device Manager ได้)");
         styleTable(portTable);
         portTable.getColumnModel().getColumn(0).setMaxWidth(70);
+        portTable.setPreferredScrollableViewportSize(new Dimension(600, 200)); // show several attached rows by default
         portCard.add(scroll(portTable), BorderLayout.CENTER);
         JPanel portButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         portButtons.setOpaque(false);
@@ -483,7 +486,10 @@ public class App {
         meterRows.add(meterLan);
         portSouth.add(meterRows, BorderLayout.SOUTH);
         portCard.add(portSouth, BorderLayout.SOUTH);
-        center.add(portCard);
+        GridBagConstraints gcBot = new GridBagConstraints();
+        gcBot.gridx = 0; gcBot.gridy = 1; gcBot.fill = GridBagConstraints.BOTH;
+        gcBot.weightx = 1; gcBot.weighty = 1.7; // give the attached-devices list more height so rows are visible
+        center.add(portCard, gcBot);
         startTrafficMeter();
         client.add(center, BorderLayout.CENTER);
         JTabbedPane tabs = new JTabbedPane();
