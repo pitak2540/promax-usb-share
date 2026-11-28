@@ -114,10 +114,12 @@ public class App {
     LicenseGuard license;
     final JLabel licLabel = new JLabel();
     JButton childDownloadBtn; // created in the constructor (fonts must be ready first)
-    // direct-download URL for this brand's installer (GitHub serves the latest asset by this stable path)
+    // true in the dedicated child build (receive-only, no sharing, no license) via -Dusbshare.child=true
+    static final boolean CHILD = Boolean.getBoolean("usbshare.child");
+    // direct-download URL for the receive-only CHILD installer of this brand (latest release asset)
     static String childInstallerUrl() {
         return "https://github.com/pitak2540/promax-usb-share/releases/latest/download/"
-                + com.james.usbshare.Brand.FILE + "-Setup.exe";
+                + com.james.usbshare.Brand.FILE + "-Child-Setup.exe";
     }
 
     void updateLicenseLabel() {
@@ -139,7 +141,7 @@ public class App {
 
     /** Registered sharer downloads this brand's installer straight to a file (no GitHub page). */
     void downloadChild() {
-        String file = com.james.usbshare.Brand.FILE + "-Setup.exe";
+        String file = com.james.usbshare.Brand.FILE + "-Child-Setup.exe";
         JFileChooser fc = new JFileChooser();
         fc.setDialogTitle("บันทึกโปรแกรมลูก (ตัวติดตั้ง)");
         String home = System.getProperty("user.home", ".");
@@ -351,7 +353,7 @@ public class App {
         UIManager.put("OptionPane.messageFont", FONT);
         UIManager.put("OptionPane.buttonFont", FONT);
 
-        frame = new JFrame(com.james.usbshare.Brand.NAME);
+        frame = new JFrame(com.james.usbshare.Brand.NAME + (CHILD ? "  (เครื่องลูก — รับอย่างเดียว)" : ""));
         java.awt.image.BufferedImage logoImg = null;
         try (java.io.InputStream li = App.class.getResourceAsStream("/logo.png")) {
             if (li != null) logoImg = javax.imageio.ImageIO.read(li);
@@ -411,17 +413,25 @@ public class App {
         JPanel licBox = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         licBox.setOpaque(false);
         licLabel.setFont(FONT);
-        JButton reg = button("ลงทะเบียน", LINE);
-        reg.addActionListener(e -> license.showDialog());
-        licBox.add(licLabel);
-        childDownloadBtn = button("⬇ ดาวน์โหลดโปรแกรมลูก (แจกได้ไม่จำกัด)", new Color(0x1C7C4A));
-        childDownloadBtn.setVisible(false); // only a registered sharer may hand out the child program
-        childDownloadBtn.addActionListener(e -> downloadChild());
-        licBox.add(childDownloadBtn);
-        licBox.add(reg);
-        JButton buy = button("ซื้อคีย์ / ติดต่อผู้พัฒนา", new Color(0x06C755));
-        buy.addActionListener(e -> license.contactDeveloper());
-        licBox.add(buy);
+        if (CHILD) {
+            // the child program only receives — no license, no sharing, no register/buy buttons
+            JLabel childTag = new JLabel("โหมดลูก — รับ USB อย่างเดียว (ฟรี ไม่มีหมดอายุ)");
+            childTag.setFont(FONT);
+            childTag.setForeground(new Color(0x37D67A));
+            licBox.add(childTag);
+        } else {
+            JButton reg = button("ลงทะเบียน", LINE);
+            reg.addActionListener(e -> license.showDialog());
+            licBox.add(licLabel);
+            childDownloadBtn = button("⬇ ดาวน์โหลดโปรแกรมลูก (แจกได้ไม่จำกัด)", new Color(0x1C7C4A));
+            childDownloadBtn.setVisible(false); // only a registered sharer may hand out the child program
+            childDownloadBtn.addActionListener(e -> downloadChild());
+            licBox.add(childDownloadBtn);
+            licBox.add(reg);
+            JButton buy = button("ซื้อคีย์ / ติดต่อผู้พัฒนา", new Color(0x06C755));
+            buy.addActionListener(e -> license.contactDeveloper());
+            licBox.add(buy);
+        }
         header.add(licBox, BorderLayout.EAST);
         root.add(header, BorderLayout.NORTH);
 
@@ -579,8 +589,10 @@ public class App {
         tabs.setBackground(CARD);
         tabs.setForeground(Color.WHITE);
         tabs.addTab("  ใช้ USB จากเครื่องอื่น  ", client);
-        sharePanel = new SharePanel(this);
-        tabs.addTab("  แชร์ USB ของคอมนี้  ", sharePanel);
+        if (!CHILD) { // the child program cannot share — it only receives
+            sharePanel = new SharePanel(this);
+            tabs.addTab("  แชร์ USB ของคอมนี้  ", sharePanel);
+        }
         root.add(tabs, BorderLayout.CENTER);
 
         // ---- log (bottom)

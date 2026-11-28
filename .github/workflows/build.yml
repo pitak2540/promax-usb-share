@@ -106,6 +106,12 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Host "::error title=SELFTEST::bundled runtime cannot reach the relay over TLS"; exit 1 }
           Write-Host "::notice title=SELFTEST::bundled runtime reached the relay over TLS"
           Compress-Archive -Path "dist/$env:FILE" -DestinationPath "$env:FILE-Windows.zip"
+          # receive-only CHILD app-image (same jar, launched with -Dusbshare.child=true)
+          jpackage --type app-image --name "$env:FILE-Child" --input jar --main-jar app.jar `
+            --main-class com.james.usbshare.desktop.App --icon desktop/icon.ico `
+            --app-version 1.0.0 --vendor $env:FILE --description "$env:FILE Child" `
+            --add-modules java.base,java.desktop,java.logging,java.prefs,jdk.crypto.ec,jdk.crypto.cryptoki --java-options "-Dfile.encoding=UTF-8" --java-options "-Dusbshare.child=true" --dest dist
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           # owner-only key generator (no private key inside: it is loaded from a file at run time)
           $ksrc = Get-ChildItem -Recurse -Filter *.java common/src, keygen/src | ForEach-Object { $_.FullName }
           New-Item -ItemType Directory -Force kclasses, kjar, kdist | Out-Null
@@ -138,12 +144,22 @@ jobs:
             exit 1
           }
           Copy-Item "dist\$env:FILE-Setup.exe" "$env:FILE-Setup.exe"
+          # receive-only CHILD installer (separate app, installs alongside the master)
+          $out2 = & $iscc /DCHILD=1 /DAppVersion=1.0.${{ github.run_number }} installer\setup.iss 2>&1
+          $code2 = $LASTEXITCODE
+          $out2 | Select-Object -Last 25 | ForEach-Object { Write-Host $_ }
+          if ($code2 -ne 0) {
+            $out2 | Where-Object { $_ -match 'Error|error|Line' } | Select-Object -Last 6 | ForEach-Object { Write-Host "::error title=ISCC_CHILD::$_" }
+            exit 1
+          }
+          Copy-Item "dist\$env:FILE-Child-Setup.exe" "$env:FILE-Child-Setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: "${{ env.FILE }}-windows"
           path: |
             ${{ env.FILE }}-Windows.zip
             ${{ env.FILE }}-Setup.exe
+            ${{ env.FILE }}-Child-Setup.exe
             ${{ env.FILE }}-LicenseGen-Windows.zip
 
   release:
