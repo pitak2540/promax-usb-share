@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        brand: [promax, baanna]
+        brand: [promax, baanna, remap]
     steps:
       - uses: actions/checkout@v4
       - name: Apply brand
@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        brand: [promax, baanna]
+        brand: [promax, baanna, remap]
     steps:
       - uses: actions/checkout@v4
       - name: Apply brand
